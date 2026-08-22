@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createArtifacts, validateRun, verifyArtifacts } from './finalize-run.mjs';
+import { INSTRUMENT_POLICY } from './policy.mjs';
 
 const RUN = '2026-08-22-slot0417-gh1a1';
 const VANTAGE = 'github-actions-ubuntu-dynamic';
@@ -110,6 +111,35 @@ assert.throws(
   /sidecar already exists/,
   'sidecars are immutable',
 );
+
+// The manifest now carries the two things a future comparison depends on: the
+// derived numbers, and the comparability profile of the instrument that produced
+// them. Both are re-derived on the verify pass, so neither can be hand-edited
+// between capture and publication — the shape that would let a release assert a
+// number nobody can regenerate from its own bytes.
+const manifestPath = join(good.dir, `${RUN}.manifest.json`);
+const published = JSON.parse(readFileSync(manifestPath, 'utf8'));
+assert.ok(published.aggregates?.outcomes, 'manifest must carry derived aggregates');
+assert.equal(published.aggregates.rows, summary.rows, 'manifest aggregates must describe this dataset');
+assert.deepEqual(published.instrument_policy, INSTRUMENT_POLICY);
+
+for (const [label, mutate, pattern] of [
+  ['hand-edited aggregate', (m) => { m.aggregates.outcomes.reachable = (m.aggregates.outcomes.reachable ?? 0) + 1; }, /aggregates are not reproducible/],
+  ['drifted comparability profile', (m) => { m.instrument_policy = { ...m.instrument_policy, robots_unavailable: 'fail-open' }; }, /instrument policy does not match/],
+]) {
+  const tampered = JSON.parse(JSON.stringify(published));
+  mutate(tampered);
+  writeFileSync(manifestPath, `${JSON.stringify(tampered, null, 2)}\n`);
+  assert.throws(
+    () => verifyArtifacts(good.file, { run: RUN, list: good.list, vantage: VANTAGE }),
+    pattern,
+    `publisher must reject a ${label}`,
+  );
+}
+// Restored: the gate goes green again on the untampered manifest, so the two
+// rejections above are the gate working and not a permanently red check.
+writeFileSync(manifestPath, `${JSON.stringify(published, null, 2)}\n`);
+verifyArtifacts(good.file, { run: RUN, list: good.list, vantage: VANTAGE });
 
 writeFileSync(join(good.dir, `${RUN}.sha256`), 'wrong\n');
 assert.throws(

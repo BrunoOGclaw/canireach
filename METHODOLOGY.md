@@ -57,6 +57,47 @@ runs are published as immutable GitHub Releases with the raw JSONL, a manifest,
 and SHA-256 checksum. A transient Actions artifact only moves validated bytes
 between the unprivileged probe job and the narrowly write-enabled publisher job.
 
+## Comparability between captures
+
+The claim this dataset exists to support is a difference between two dates. A
+difference only describes the web if the instrument held still, so each release
+manifest records the instrument's comparability profile alongside its vantage,
+and `tools/compare.mjs` refuses to emit a delta between two captures that
+disagree on any of these dimensions:
+
+`vantage.class`, `input.sha256`, and the instrument's row schema version,
+robots-unavailable policy, redirect policy, denial gate, and dialect set.
+
+A dimension that a manifest does not record reads as `unrecorded`, and
+`unrecorded` never equals anything — including another `unrecorded`. Two
+captures whose policy nobody wrote down are not thereby known to share one.
+
+A differing dimension can be acknowledged explicitly (`--acknowledge
+vantage.class`), which releases the delta and attaches that dimension to the
+output as a named confounder. Acknowledgement is not a bypass: the confounder
+travels with the numbers, so a delta computed across a vantage change cannot be
+quoted without the vantage change quoted with it.
+
+**There is one such discontinuity already in the record, and it is the most
+important caveat on this dataset.** The first baseline,
+`2026-08-22T0815Z`, was captured from a residential host, with an unreadable
+`robots.txt` failing **open**. Every capture in the automated nightly series
+runs from GitHub-hosted dynamic egress, with an unreadable `robots.txt` failing
+**closed**. Each change moves the headline numbers on its own, and both move
+them in the direction that looks like "the web got harder" — which is precisely
+the claim the September 15 comparison is meant to test. Fail-closed is the
+correct behaviour and stays; the discontinuity is handled by declaring it, not
+by reverting it.
+
+The profile is declared in `tools/policy.mjs` and derived back out of the
+running probe by `tools/test-policy.mjs`. A declaration that drifts from the
+code it describes is worse than no declaration: it is a confounder that reads
+as a control.
+
+The manifest also carries the derived aggregates, and the publication gate
+recomputes them from the same bytes it is about to publish. No number on a
+release is hand-maintained.
+
 ## Input provenance
 
 `data/domains/tranco-74V8X-1000.csv` contains ranks 1-1000 from Tranco list

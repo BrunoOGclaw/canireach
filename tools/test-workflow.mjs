@@ -1,11 +1,28 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const workflowUrl = new URL('../.github/workflows/nightly-baseline.yml', import.meta.url);
 const workflow = readFileSync(fileURLToPath(workflowUrl), 'utf8');
+const ciUrl = new URL('../.github/workflows/test.yml', import.meta.url);
+const ci = readFileSync(fileURLToPath(ciUrl), 'utf8');
+
+// Both gates must run EVERY test by discovery. The failure this prevents is
+// specific and had already happened: test-aggregate.mjs existed, ran in CI, and
+// was absent from the nightly's pre-flight gate, so the unattended run that
+// actually touches the network was proving less than the pull request did.
+const suite = readdirSync(fileURLToPath(new URL('.', import.meta.url)))
+  .filter((f) => /^test-.*\.mjs$/.test(f))
+  .sort();
+assert.ok(suite.length >= 6, `test discovery found only ${suite.length} files`);
+for (const [label, text] of [['nightly', workflow], ['ci', ci]]) {
+  assert.match(text, /for t in tools\/test-\*\.mjs; do/, `${label} must discover the suite, not list it`);
+  assert.match(text, /node tools\/mutate-robots\.mjs/, `${label} must run the robots mutation gate`);
+  // A discovery loop that ran nothing would pass a `for` loop silently.
+  assert.match(text, /node "\$t"/, `${label} must execute each discovered test`);
+}
 
 assert.match(workflow, /cron: '17 4,5 \* \* \*'/);
 assert.match(workflow, /timezone: 'America\/Chicago'/);
