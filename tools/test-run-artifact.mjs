@@ -123,9 +123,22 @@ assert.ok(published.aggregates?.outcomes, 'manifest must carry derived aggregate
 assert.equal(published.aggregates.rows, summary.rows, 'manifest aggregates must describe this dataset');
 assert.deepEqual(published.instrument_policy, INSTRUMENT_POLICY);
 
+// ...and WHEN it looked. Everything in the profile above describes how the
+// instrument was configured; the slot is the only dimension that says which hour
+// the observations came from, and without it two captures fourteen hours apart
+// compared as strictly comparable.
+assert.equal(published.observation_window?.slot, '04:17[America/Chicago]', 'manifest must carry the slot');
+assert.equal(typeof published.observation_window.drift_minutes, 'number', 'and the slip from it');
+
 for (const [label, mutate, pattern] of [
   ['hand-edited aggregate', (m) => { m.aggregates.outcomes.reachable = (m.aggregates.outcomes.reachable ?? 0) + 1; }, /aggregates are not reproducible/],
   ['drifted comparability profile', (m) => { m.instrument_policy = { ...m.instrument_policy, robots_unavailable: 'fail-open' }; }, /instrument policy does not match/],
+  // A dimension that can be edited between capture and publication is not a
+  // control. Editing the slot is how a daytime capture would be dressed up as a
+  // nightly one, and it is the single edit that would re-open the pairing this
+  // dimension exists to block.
+  ['relabelled observation slot', (m) => { m.observation_window = { ...m.observation_window, slot: '00:00[UTC]' }; }, /observation window is not reproducible/],
+  ['adjusted schedule drift', (m) => { m.observation_window = { ...m.observation_window, drift_minutes: (m.observation_window.drift_minutes ?? 0) + 7 }; }, /observation window is not reproducible/],
 ]) {
   const tampered = JSON.parse(JSON.stringify(published));
   mutate(tampered);

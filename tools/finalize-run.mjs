@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { aggregateFile } from './aggregate.mjs';
-import { INSTRUMENT_POLICY } from './policy.mjs';
+import { INSTRUMENT_POLICY, observationWindow } from './policy.mjs';
 
 const DIALECTS = ['browser', 'curl', 'canireach', 'gptbot', 'claudebot'];
 const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_auth'];
@@ -263,6 +263,11 @@ export function createArtifacts(file, options, provenance) {
     schema_version: 3,
     capture_id: options.run,
     scheduled_slot: provenance.scheduled_slot,
+    // WHEN the instrument looked, as a repeatable slot rather than an instant.
+    // Every other comparability dimension describes how the instrument was
+    // configured; none of them described the hour, and the first two automated
+    // captures were fourteen hours apart with zero confounders reported.
+    observation_window: observationWindow(provenance.scheduled_slot, summary.observed_from),
     observed_from: summary.observed_from,
     observed_through: summary.observed_through,
     instrument_commit: provenance.instrument_sha,
@@ -341,6 +346,15 @@ export function verifyArtifacts(file, options, expected = {}) {
   // the aggregates on a release can be trusted without re-running the tool.
   if (JSON.stringify(manifest.instrument_policy) !== JSON.stringify(INSTRUMENT_POLICY)) {
     fail('manifest instrument policy does not match this instrument');
+  }
+  // Re-derived from the two fields it is a function of, for the same reason the
+  // aggregates are: a comparability dimension that could be edited between
+  // capture and publication is not a control.
+  if (
+    JSON.stringify(manifest.observation_window) !==
+    JSON.stringify(observationWindow(manifest.scheduled_slot, summary.observed_from))
+  ) {
+    fail('manifest observation window is not reproducible from the schedule and the observations');
   }
   if (JSON.stringify(manifest.aggregates) !== JSON.stringify(aggregateFile(file))) {
     fail('manifest aggregates are not reproducible from the dataset');
