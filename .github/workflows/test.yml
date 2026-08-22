@@ -19,3 +19,4 @@ jobs:
       - run: node tools/mutate-robots.mjs
       - run: node tools/test-probe.mjs
       - run: node tools/test-run-artifact.mjs
+      - run: node tools/test-workflow.mjs

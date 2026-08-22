@@ -30,7 +30,7 @@ jobs:
       capture_id: ${{ steps.plan.outputs.capture_id }}
       scheduled_slot: ${{ steps.plan.outputs.scheduled_slot }}
     steps:
-      - name: Require immutable storage and plan one capture per local date
+      - name: Plan one capture per local date
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,17 +40,14 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          immutable=$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')
-          test "$immutable" = true
-
           current_slot_date=$(node -e "console.log(new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()))")
           should_run=true
           if [ "$EVENT_NAME" = schedule ] || [ -n "$INPUT_SLOT_DATE" ]; then
             slot_date=${INPUT_SLOT_DATE:-$current_slot_date}
             case "$slot_date" in ????-??-??) ;; *) echo 'slot_date must be YYYY-MM-DD' >&2; exit 2 ;; esac
             prefix="baseline-${slot_date}-slot0417-America_Chicago-"
-            releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName)
-            if RELEASES="$releases" PREFIX="$prefix" node -e "const a=JSON.parse(process.env.RELEASES);process.exit(a.some(x=>x.tagName.startsWith(process.env.PREFIX))?0:1)"; then
+            releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isImmutable)
+            if RELEASES="$releases" PREFIX="$prefix" node -e "const a=JSON.parse(process.env.RELEASES);process.exit(a.some(x=>x.tagName.startsWith(process.env.PREFIX)&&!x.isDraft&&x.isImmutable)?0:1)"; then
               should_run=false
             fi
             trigger=${EVENT_NAME//_/-}
@@ -93,6 +90,7 @@ jobs:
           node tools/mutate-robots.mjs
           node tools/test-probe.mjs
           node tools/test-run-artifact.mjs
+          node tools/test-workflow.mjs
       - name: Capture the top 1,000
         run: |
           set -euo pipefail
@@ -173,6 +171,18 @@ jobs:
         run: |
           set -euo pipefail
           tag="baseline-${CAPTURE_ID}"
+          cleanup_release=true
+          cleanup() {
+            exit_code=$?
+            trap - EXIT
+            if [ "$cleanup_release" = true ]; then
+              set +e
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            fi
+            exit "$exit_code"
+          }
+          trap cleanup EXIT
+
           gh release create "$tag" \
             "data/probes/${CAPTURE_ID}.jsonl" \
             "data/probes/${CAPTURE_ID}.manifest.json" \
@@ -181,9 +191,23 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Baseline ${CAPTURE_ID}" \
             --notes "Automated top-1,000 behavioral capture. The attached manifest binds the raw JSONL to its input list, exact instrument commit, workflow execution, dynamic GitHub-hosted vantage, row counts, privacy gate, and SHA-256." \
+            --draft \
             --latest=false
 
-          test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')" = $'false\ttrue'
+          test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')" = $'true\tfalse'
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+
+          immutable=false
+          for _ in 1 2 3 4 5; do
+            if [ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')" = $'false\ttrue' ]; then
+              immutable=true
+              break
+            fi
+            sleep 5
+          done
+          test "$immutable" = true
+          cleanup_release=false
+
           verified=false
           for _ in 1 2 3; do
             if gh release verify "$tag" --repo "$GITHUB_REPOSITORY" && \

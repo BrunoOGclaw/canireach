@@ -13,8 +13,9 @@ For each domain and dialect, v1 records:
 Responses are capped at 12 KiB in memory for fingerprinting and discarded.
 The dataset stores no response body, cookies, presented user-agent strings, or
 general response-header map. It does retain a narrow metadata allowlist:
-`server`, `x_robots_tag`, the presence (not value) of `cf-ray`, and toll-related
-header names. Header names are not header values and cannot carry credentials.
+`server`, `x_robots_tag`, `content_type`, the presence (not value) of `cf-ray`,
+and toll-related header names. Header names are not header values and cannot
+carry credentials.
 
 ## Identity
 
@@ -65,8 +66,9 @@ the list is a sampling frame, not a claim about exact global popularity.
 ## Known limits
 
 - One probe location cannot separate IP reputation or geography from identity.
-- A missing or unavailable `robots.txt` makes policy unknown; v1 proceeds with
-  the status probe and labels that uncertainty.
+- An explicit 404/410 means no `robots.txt` policy and permits the status probe.
+  Redirects, auth/challenge responses, rate limits, server failures, and network
+  errors leave policy unknown; schema v2 fails closed and sends no later request.
 - Challenge detection is fingerprint-based and can have false positives or
   false negatives.
 - A 200 response can be a soft 404. Agent-affordance files apply a conservative

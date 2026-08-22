@@ -209,7 +209,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- per-domain -------------------------------------------------------------
 
-async function probeDomain(rank, domain) {
+function unavailableRobotsVerdict(robotsRes) {
+  // RFC 9309 permits access when robots.txt is explicitly unavailable (4xx),
+  // but this unattended instrument uses the narrower 404/410 signal. Redirects,
+  // auth/challenge responses, rate limits, server failures, and network errors
+  // leave policy unknown and therefore fail closed.
+  if (robotsRes.ok && (robotsRes.status === 404 || robotsRes.status === 410)) {
+    return { allowed: true, reason: `robots-http-${robotsRes.status}`, rule: null, group: null };
+  }
+  return {
+    allowed: false,
+    reason: robotsRes.ok ? `robots-policy-unknown-http-${robotsRes.status}` : `robots-policy-unknown-${robotsRes.error}`,
+    rule: null,
+    group: null,
+  };
+}
+
+export async function probeDomain(rank, domain, { probeUrlImpl = probeUrl, sleepImpl = sleep } = {}) {
   const rows = [];
   const ts = new Date().toISOString();
   const base = { schema_version: 2, ts, run: RUN, vantage: VANTAGE, rank, domain };
@@ -217,7 +233,7 @@ async function probeDomain(rank, domain) {
   // 1. robots.txt, always, with our own honest identity. robots.txt is the policy
   //    file itself and is never gated by its own contents.
   const ourUa = DIALECTS.find((d) => d.id === 'canireach').ua;
-  const robotsRes = await probeUrl(`https://${domain}/robots.txt`, ourUa);
+  const robotsRes = await probeUrlImpl(`https://${domain}/robots.txt`, ourUa);
   const robotsOk = robotsRes.ok && robotsRes.status === 200;
   const robotsText = robotsOk ? robotsRes.body : '';
 
@@ -231,13 +247,16 @@ async function probeDomain(rank, domain) {
     // A robots.txt that is itself behind a challenge is a finding in its own right.
     challenge: robotsRes.ok ? detectChallenge(robotsRes.headers, robotsRes.body) : null,
     truncated: (robotsRes.bytes_read ?? 0) >= MAX_BODY,
+    redirected: robotsRes.ok ? Boolean(robotsRes.redirect) : false,
+    redirect_target_host: robotsRes.redirect?.target_host ?? null,
+    redirect_target_scheme: robotsRes.redirect?.target_scheme ?? null,
   });
 
   // 2. Per-dialect: policy verdict first, request only if permitted.
   for (const d of DIALECTS) {
     const verdict = robotsOk
       ? isAllowed(robotsText, d.robots_token, '/')
-      : { allowed: true, reason: robotsRes.ok ? `robots-http-${robotsRes.status}` : `robots-${robotsRes.error}`, rule: null, group: null };
+      : unavailableRobotsVerdict(robotsRes);
 
     const row = {
       ...base,
@@ -262,7 +281,7 @@ async function probeDomain(rank, domain) {
       continue;
     }
 
-    const res = await probeUrl(`https://${domain}/`, d.ua);
+    const res = await probeUrlImpl(`https://${domain}/`, d.ua);
     row.requested = true;
     if (!res.ok) {
       row.outcome = 'error';
@@ -287,20 +306,20 @@ async function probeDomain(rank, domain) {
       row.outcome = classifyOutcome(res.status, challenge, toll);
     }
     rows.push(row);
-    await sleep(POLITE_GAP_MS);
+    await sleepImpl(POLITE_GAP_MS);
   }
 
   // 3. Agent-affordance files, gated on our own token's policy for that path.
   for (const f of SITE_FILES) {
     if (f.id === 'robots') continue; // already done
-    const permitted = robotsOk ? isAllowed(robotsText, 'CanIReachBot', f.path).allowed : true;
+    const permitted = robotsOk ? isAllowed(robotsText, 'CanIReachBot', f.path).allowed : unavailableRobotsVerdict(robotsRes).allowed;
     if (!permitted) {
       // Keep the schema uniform: a downstream aggregate must never have to
       // distinguish "absent" from "field missing".
       rows.push({ ...base, kind: 'file', file: f.id, status: null, present: false, soft_404: false, outcome: 'denied_by_robots' });
       continue;
     }
-    const res = await probeUrl(`https://${domain}${f.path}`, ourUa);
+    const res = await probeUrlImpl(`https://${domain}${f.path}`, ourUa);
     const verdictFile = classifyFile(f.id, res);
     rows.push({
       ...base,
@@ -316,7 +335,7 @@ async function probeDomain(rank, domain) {
       redirect_target_host: res.redirect?.target_host ?? null,
       redirect_target_scheme: res.redirect?.target_scheme ?? null,
     });
-    await sleep(POLITE_GAP_MS);
+    await sleepImpl(POLITE_GAP_MS);
   }
 
   return rows;

@@ -35,11 +35,11 @@ locks the tag and assets after publication. Raw captures do not live in Git
 history and workflow artifacts are only a one-day handoff, never durable storage.
 
 The first pre-September 15 capture is 10,000 rows across 1,000 domains. Its
-[`corrected immutable manifest`](https://github.com/BrunoOGclaw/canireach/releases/tag/baseline-2026-08-22T0815Z-metadata-correction)
+[`final corrected immutable manifest`](https://github.com/BrunoOGclaw/canireach/releases/tag/baseline-2026-08-22T0815Z-metadata-correction-v2)
 preserves the exact raw bytes and documents the legacy v1 detail that row `run`
 values contain only `2026-08-22`; the release tag and filename are the canonical
-capture identity. The additive correction clarifies the narrow selected-header
-allowlist without rewriting the original immutable release.
+capture identity. The additive corrections exhaustively disclose the narrow
+selected-header allowlist without rewriting either prior immutable release.
 
 The nightly workflow has a primary 04:17 America/Chicago slot and a 05:17
 fallback. A constant concurrency group prevents overlap, and the fallback exits

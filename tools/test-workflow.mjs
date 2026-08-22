@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const workflowUrl = new URL('../.github/workflows/nightly-baseline.yml', import.meta.url);
+const workflow = readFileSync(fileURLToPath(workflowUrl), 'utf8');
+
+assert.match(workflow, /cron: '17 4,5 \* \* \*'/);
+assert.match(workflow, /timezone: 'America\/Chicago'/);
+assert.match(workflow, /group: canireach-nightly-baseline\n  cancel-in-progress: false/);
+assert.doesNotMatch(workflow, /immutable-releases/);
+assert.doesNotMatch(workflow, /--clobber/);
+assert.match(workflow, /--json tagName,isDraft,isImmutable/);
+assert.match(workflow, /!x\.isDraft&&x\.isImmutable/);
+
+const capture = workflow.slice(workflow.indexOf('  capture:'), workflow.indexOf('  publish:'));
+const publish = workflow.slice(workflow.indexOf('  publish:'), workflow.indexOf('  failure-alert:'));
+assert.match(capture, /permissions:\n      contents: read/);
+assert.match(capture, /persist-credentials: false/);
+assert.doesNotMatch(capture, /github\.token|GH_TOKEN|gh release/);
+assert.match(publish, /permissions:\n      contents: write/);
+assert.doesNotMatch(publish, /probe\.mjs/);
+
+const draft = publish.indexOf('gh release create');
+const draftFlag = publish.indexOf('--draft', draft);
+const publishDraft = publish.indexOf('gh release edit', draftFlag);
+const immutableCheck = publish.indexOf("test \"$immutable\" = true", publishDraft);
+const preserveImmutable = publish.indexOf('cleanup_release=false', immutableCheck);
+const verifyRelease = publish.indexOf('gh release verify', preserveImmutable);
+assert.ok(draft >= 0 && draftFlag > draft, 'release must start as a draft');
+assert.ok(publishDraft > draftFlag, 'draft must be published only after asset attachment');
+assert.ok(immutableCheck > publishDraft, 'published release must be proven immutable');
+assert.ok(preserveImmutable > immutableCheck, 'mutable publication failures must remain cleanup-eligible');
+assert.ok(verifyRelease > preserveImmutable, 'attestation must follow immutable-state proof');
+assert.match(publish, /gh release delete "\$tag" .* --cleanup-tag --yes/);
+
+for (const use of workflow.matchAll(/uses:\s*([^\s#]+)/g)) {
+  assert.match(use[1], /^[^@]+@[0-9a-f]{40}$/, `action is not pinned to a full SHA: ${use[1]}`);
+}
+
+console.log('nightly workflow policy: schedule, separation, pinning, and fail-closed publication passed');

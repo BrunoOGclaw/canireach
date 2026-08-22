@@ -63,6 +63,10 @@ mustFail('missing row', (rows) => rows.slice(0, -1));
 mustFail('duplicate identity', (rows) => [...rows.slice(0, -1), { ...rows[0] }]);
 mustFail('forbidden response body', (rows) => rows.map((row, i) => (i === 0 ? { ...row, body: 'secret' } : row)));
 mustFail('generic headers map', (rows) => rows.map((row, i) => (i === 0 ? { ...row, headers: { server: 'x' } } : row)));
+mustFail('unapproved row key', (rows) => rows.map((row, i) => (i === 0 ? { ...row, arbitrary_header_value: 'x' } : row)));
+mustFail('unapproved toll key', (rows) => rows.map((row, i) => (
+  i === 0 ? { ...row, toll: { status_402: false, arbitrary_header_value: 'x' } } : row
+)));
 mustFail('credential-shaped value', (rows) => rows.map((row, i) => (
   i === 0 ? { ...row, server: ['ghp', '123456789012345678901234'].join('_') } : row
 )));
@@ -133,4 +137,4 @@ assert.throws(
   'a partial is never publishable as a final artifact',
 );
 
-console.log('run artifact gate: 10-row positive control and 14 fault paths passed');
+console.log('run artifact gate: 10-row positive control and 16 fault paths passed');

@@ -8,6 +8,47 @@ import { pathToFileURL } from 'node:url';
 
 const DIALECTS = ['browser', 'curl', 'canireach', 'gptbot', 'claudebot'];
 const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_auth'];
+const COMMON_ROW_KEYS = ['schema_version', 'ts', 'run', 'vantage', 'rank', 'domain', 'kind'];
+const REQUEST_ROW_KEYS = new Set([
+  ...COMMON_ROW_KEYS,
+  'dialect',
+  'dialect_kind',
+  'robots',
+  'requested',
+  'outcome',
+  'error',
+  'error_detail',
+  'elapsed_ms',
+  'status',
+  'redirected',
+  'redirect_target_host',
+  'redirect_target_scheme',
+  'redirect_cross_origin',
+  'final_host',
+  'challenge',
+  'toll',
+  'server',
+  'x_robots_tag',
+  'cf_ray',
+]);
+const FILE_ROW_KEYS = new Set([
+  ...COMMON_ROW_KEYS,
+  'file',
+  'status',
+  'error',
+  'bytes',
+  'challenge',
+  'truncated',
+  'present',
+  'soft_404',
+  'outcome',
+  'content_type',
+  'redirected',
+  'redirect_target_host',
+  'redirect_target_scheme',
+]);
+const ROBOTS_KEYS = new Set(['allowed', 'reason', 'rule', 'group', 'explicit', 'known']);
+const TOLL_KEYS = new Set(['status_402', 'header_names']);
 const OUTCOMES = new Set([
   'reachable',
   'error',
@@ -89,6 +130,13 @@ function scanValue(value, path = '') {
   }
 }
 
+function assertKeys(value, allowed, label, line) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`invalid ${label} at line ${line}`);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) fail(`unapproved ${label} key ${key} at line ${line}`);
+  }
+}
+
 export function validateRun(file, { run, list, vantage, allowPartial = false, limit = Infinity }) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(run)) fail('invalid run identity');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(vantage)) fail('invalid vantage identity');
@@ -133,6 +181,7 @@ export function validateRun(file, { run, list, vantage, allowPartial = false, li
 
     let identity;
     if (row.kind === 'request') {
+      assertKeys(row, REQUEST_ROW_KEYS, 'request row', index + 1);
       if (!DIALECTS.includes(row.dialect)) fail(`unknown dialect at line ${index + 1}`);
       identity = `request:${row.dialect}`;
       requestRows++;
@@ -140,16 +189,21 @@ export function validateRun(file, { run, list, vantage, allowPartial = false, li
       if (!OUTCOMES.has(row.outcome)) fail(`unknown request outcome at line ${index + 1}`);
       outcomes[row.outcome] = (outcomes[row.outcome] || 0) + 1;
       if (!row.robots || typeof row.robots.allowed !== 'boolean') fail(`missing robots verdict at line ${index + 1}`);
+      assertKeys(row.robots, ROBOTS_KEYS, 'robots verdict', index + 1);
       if (typeof row.requested !== 'boolean') fail(`missing requested flag at line ${index + 1}`);
       if (row.requested === true && row.robots.allowed !== true) fail(`request bypassed robots at line ${index + 1}`);
       if (row.requested === false && row.outcome !== 'denied_by_robots') fail(`unrequested row has wrong outcome at line ${index + 1}`);
-      if (row.toll?.header_names) {
-        if (!Array.isArray(row.toll.header_names)) fail(`invalid toll header names at line ${index + 1}`);
-        for (const name of row.toll.header_names) {
-          if (!TOLL_HEADER_NAMES.has(name)) fail(`unapproved toll header name at line ${index + 1}`);
+      if (row.toll !== null && row.toll !== undefined) {
+        assertKeys(row.toll, TOLL_KEYS, 'toll', index + 1);
+        if (row.toll.header_names !== undefined) {
+          if (!Array.isArray(row.toll.header_names)) fail(`invalid toll header names at line ${index + 1}`);
+          for (const name of row.toll.header_names) {
+            if (!TOLL_HEADER_NAMES.has(name)) fail(`unapproved toll header name at line ${index + 1}`);
+          }
         }
       }
     } else if (row.kind === 'file') {
+      assertKeys(row, FILE_ROW_KEYS, 'file row', index + 1);
       if (!FILES.includes(row.file)) fail(`unknown file observation at line ${index + 1}`);
       identity = `file:${row.file}`;
       fileRows++;
@@ -245,7 +299,7 @@ export function createArtifacts(file, options, provenance) {
       cookies_stored: false,
       presented_user_agent_strings_stored: false,
       general_response_header_maps_stored: false,
-      selected_header_metadata: ['server', 'x_robots_tag', 'cf_ray boolean', 'toll.header_names allowlist'],
+      selected_header_metadata: ['server', 'x_robots_tag', 'content_type', 'cf_ray boolean', 'toll.header_names allowlist'],
     },
     identity_note: 'GPTBot and ClaudeBot rows are disclosed simulations, not authenticated vendor traffic.',
   };
