@@ -255,11 +255,37 @@ for (const [label, impl, expected] of [
 
 // The private-literal guard, at its edges. A hostname that RESOLVES into private
 // space is deliberately out of scope and must not be claimed.
-for (const host of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.255', '100.64.0.1', 'localhost', '[::1]', '[fe80::1]', '[fd00::1]']) {
+for (const host of [
+  '127.0.0.1', '169.254.169.254', '10.0.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.255',
+  '100.64.0.1', '0.0.0.0', 'localhost', 'foo.localhost', '[::1]', '[fe80::1]', '[fd00::1]', '[fc00::1]', '[::]',
+  // The same private addresses wearing IPv4-mapped spelling. WHATWG URL
+  // normalizes `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`, so a check that
+  // handled only the v6 prefixes above left all of private v4 reachable
+  // through one extra colon.
+  '[::ffff:7f00:1]', '[::ffff:127.0.0.1]', '[::ffff:a9fe:a9fe]', '[::ffff:169.254.169.254]', '[::ffff:c0a8:1]',
+]) {
   assert.equal(isPrivateHostLiteral(host), true, `${host} must be refused as a redirect target`);
 }
-for (const host of ['www.example.com', '8.8.8.8', '172.32.0.1', '172.15.0.1', '100.63.0.1', '[2606:4700::1111]']) {
+for (const host of [
+  'www.example.com', '8.8.8.8', '172.32.0.1', '172.15.0.1', '100.63.0.1', '100.128.0.1',
+  '[2606:4700::1111]', '[::ffff:8.8.8.8]', '[::ffff:808:808]',
+]) {
   assert.equal(isPrivateHostLiteral(host), false, `${host} is public and must be followable`);
+}
+
+// The mapped-address fold must be exercised through a real redirect too, not
+// only as a unit call: the URL parser is what produces the hex spelling.
+{
+  const rows = await probeDomain(1, 'example.com', {
+    probeUrlImpl: async (url) =>
+      url.endsWith('/robots.txt') ? redirect(url, 302, 'http://[::ffff:169.254.169.254]/latest/meta-data/') : result(url),
+    sleepImpl: noSleep,
+  });
+  assert.equal(
+    rows.find((r) => r.file === 'robots').redirect_refusal,
+    'redirect-refused-private-target',
+    'an IPv4-mapped metadata address must be refused exactly like its dotted spelling',
+  );
 }
 
 const missingCalls = [];

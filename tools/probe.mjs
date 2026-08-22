@@ -255,6 +255,18 @@ export function isPrivateHostLiteral(hostname) {
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host.startsWith('[')) {
     const v6 = host.slice(1, -1);
+    // An IPv4-mapped address is the same address wearing a different spelling,
+    // and WHATWG URL normalizes the dotted form to hex — so `[::ffff:127.0.0.1]`
+    // arrives here as `[::ffff:7f00:1]`. Checking only the v6 prefixes below
+    // would have left the entire private v4 space reachable through one extra
+    // colon. Both spellings are folded back to dotted quad and re-tested.
+    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6);
+    if (hex) {
+      const [hi, lo] = hex.slice(1).map((h) => parseInt(h, 16));
+      return isPrivateHostLiteral(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(v6);
+    if (dotted) return isPrivateHostLiteral(dotted[1]);
     // loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10)
     return v6 === '::1' || v6 === '::' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
   }

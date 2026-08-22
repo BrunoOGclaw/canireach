@@ -23,6 +23,8 @@ const MUTANTS = [
   ['redirects to private address space are followed', 'if (isPrivateHostLiteral(target.hostname))', 'if (false && isPrivateHostLiteral(target.hostname))'],
   ['link-local (cloud metadata) stops being private', 'if (a === 169 && b === 254) return true;', 'if (false) return true;'],
   ['the private 172.16/12 range runs one octet long', 'a === 172 && b >= 16 && b <= 31', 'a === 172 && b >= 16 && b <= 32'],
+  ['IPv4-mapped private addresses slip through the v6 branch', 'if (hex) {', 'if (false) {'],
+  ['the dotted IPv4-mapped spelling slips through', 'if (dotted) return isPrivateHostLiteral(dotted[1]);', 'if (false) return isPrivateHostLiteral(dotted[1]);'],
   ['non-HTTP redirect schemes are followed', "if (target.protocol !== 'https:' && target.protocol !== 'http:')", 'if (false)'],
   ['a redirect with no Location is followed anyway', "if (!loc) return { refusal: 'redirect-no-location' };", 'if (false) return { refusal: null };'],
   ['redirect loops are not detected', 'if (seen.has(next.url.href)) return done(\'redirect-loop\');', 'if (false) return done(\'redirect-loop\');'],
