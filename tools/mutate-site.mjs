@@ -65,8 +65,13 @@ const MUTANTS = [
   ],
   [
     'the build stops checking that the argv names the capture it rendered',
-    '  if (args[at + 1] !== expectedManifest) {',
+    '  if (named !== expectedManifest) {',
     '  if (false) {',
+  ],
+  [
+    'the manifest argument is found by position instead of by its flag',
+    '  const at = invocation.args.indexOf(MANIFEST_FLAG);\n  return at < 0 ? null : invocation.args[at + 1];',
+    '  return invocation.args[invocation.args.length - 1];',
   ],
   [
     'the refusal is exported but not wired into the derivation',

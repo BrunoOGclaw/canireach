@@ -474,6 +474,14 @@ function methodBody(s) {
 <p><a href="${esc(s.source.methodology)}">METHODOLOGY.md</a> · <a href="${esc(s.source.repository)}">source</a> · <a href="${esc(s.source.releases)}">every capture, with hashes</a></p>`;
 }
 
+const MANIFEST_FLAG = '--manifest';
+
+/** The manifest path an invocation names, looked up by flag and never by position. */
+export function manifestArgOf(invocation) {
+  const at = invocation.args.indexOf(MANIFEST_FLAG);
+  return at < 0 ? null : invocation.args[at + 1];
+}
+
 /**
  * The command this surface tells a reader to run, DERIVED from the capture it
  * was handed rather than typed.
@@ -494,8 +502,6 @@ function methodBody(s) {
  * comes from the WRITER that produces it: change how `finalize-run.mjs` names a
  * sidecar and this sentence changes with it.
  */
-const MANIFEST_FLAG = '--manifest';
-
 export function invocationFor(manifestPath, source) {
   const served = basename(String(manifestPath));
   const naming = basename(sidecars('probes/capture.jsonl', '<capture-id>').manifest);
@@ -507,9 +513,9 @@ export function invocationFor(manifestPath, source) {
       source: source.repository,
       captures: source.releases,
       note:
-        `Clone the repository and download the release carrying \`${served}\` — that asset name identifies exactly one ` +
-        'release, which matters because a capture whose metadata was corrected has more than one and only the last is ' +
-        `the one these figures came from. Any other capture works the same way: the instrument names every manifest it ` +
+        `Clone the repository and download the release carrying \`${served}\` — the asset name, not the capture id, ` +
+        'identifies the release, because a capture whose metadata was later corrected is published more than once. ' +
+        `Any other capture works the same way: the instrument names every manifest it ` +
         `writes \`${naming}\`, so pass whichever one you downloaded. The server reads local bytes, verifies them ` +
         'against the SHA-256 its manifest publishes, and refuses to start if they disagree. It opens no socket.',
     },
@@ -536,10 +542,12 @@ export function assertRunnableInvocation(invocation, expectedManifest) {
   // a filename nobody ever resolved reaches a reader as a command.
   const placeholder = args.find((a) => /[<>]/.test(String(a)));
   if (placeholder) refuse(`\`${placeholder}\` is a placeholder, not a path a reader can run`);
-  const at = args.indexOf(MANIFEST_FLAG);
-  if (at < 0) refuse(`args omit ${MANIFEST_FLAG}, which the server requires`);
-  if (args[at + 1] !== expectedManifest) {
-    refuse(`names \`${args[at + 1]}\`, but this surface was built from \`${expectedManifest}\``);
+  // Looked up by flag, never by position: "the last argument is the manifest"
+  // is the same species of assumption as the literal filename this card is about.
+  const named = manifestArgOf(invocation);
+  if (named === undefined || named === null) refuse(`args omit ${MANIFEST_FLAG}, which the server requires`);
+  if (named !== expectedManifest) {
+    refuse(`names \`${named}\`, but this surface was built from \`${expectedManifest}\``);
   }
   return invocation;
 }
@@ -626,7 +634,7 @@ function mcpBody(s, coverage, invocation) {
 
 <h2>Run it</h2>
 <pre><code>git clone ${esc(s.source.repository)}
-# from ${esc(s.source.releases)}, the release carrying ${esc(invocation.args[invocation.args.length - 1])}
+# from ${esc(s.source.releases)}, the release carrying ${esc(manifestArgOf(invocation))}
 ${esc(invocation.command)} ${invocation.args.map((a) => esc(a)).join(' ')}</code></pre>
 <p>That is the manifest asset of the capture <em>this page</em> renders, so the command reproduces the figures below. Any other capture works the same way: the instrument names every manifest it writes <code>${esc(invocation.manifest_naming)}</code>, so pass whichever one you downloaded. No dependencies and no <code>package.json</code>; the protocol is a few message shapes. The full descriptor, including every tool's input schema, is at <a href="/api/mcp.json">/api/mcp.json</a> — readable without completing a handshake.</p>
 
