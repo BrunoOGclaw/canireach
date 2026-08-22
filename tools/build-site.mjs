@@ -10,10 +10,10 @@
 //
 // Usage: node tools/build-site.mjs [--capture FILE] [--manifest FILE] [--out DIR]
 
-import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { aggregate } from './aggregate.mjs';
+import { loadVerifiedCapture } from './capture.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
 
 export const SITE_ORIGIN = 'https://canireach.ai';
@@ -26,33 +26,10 @@ const esc = (s) =>
 
 const pct = (n, d) => (d ? `${((n / d) * 100).toFixed(1)}%` : 'n/a');
 
-/**
- * Read the capture and prove it is the published artifact before any number
- * derived from it reaches a public page.
- */
-export function loadVerifiedCapture(capturePath, manifestPath) {
-  const bytes = readFileSync(capturePath);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const sha256 = createHash('sha256').update(bytes).digest('hex');
-  const declared = manifest?.dataset?.sha256;
-  if (!declared) {
-    throw new Error(`manifest ${manifestPath} declares no dataset.sha256; refusing to publish its numbers`);
-  }
-  if (sha256 !== declared) {
-    throw new Error(
-      `capture bytes do not match the published manifest\n  computed ${sha256}\n  manifest ${declared}`,
-    );
-  }
-  const rows = bytes
-    .toString('utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l));
-  if (manifest.dataset.rows !== rows.length) {
-    throw new Error(`manifest declares ${manifest.dataset.rows} rows; file holds ${rows.length}`);
-  }
-  return { rows, manifest, sha256 };
-}
+// The bytes-match-the-manifest guarantee now lives in tools/capture.mjs, because
+// tools/compare.mjs needs the identical check to admit the immutable v1 baseline.
+// Re-exported so this module's published surface is unchanged.
+export { loadVerifiedCapture };
 
 /**
  * The dialect table is the finding, so it is derived rather than narrated: for

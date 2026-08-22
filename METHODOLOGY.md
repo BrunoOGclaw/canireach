@@ -98,6 +98,34 @@ The manifest also carries the derived aggregates, and the publication gate
 recomputes them from the same bytes it is about to publish. No number on a
 release is hand-maintained.
 
+### Reading a manifest that predates the aggregates block
+
+The first baseline is schema v1: it was published before manifests carried
+aggregates, and it is an immutable release, so it cannot be regenerated in
+place. Rather than leave the one capture the September 15 comparison exists for
+outside that comparison, `compare.mjs` recomputes a v1 side's aggregates from
+the capture's own bytes, and admits them only when
+
+1. the bytes hash to the `dataset.sha256` published in the manifest,
+2. the row count matches the one the manifest declares, and
+3. the recomputed outcome counts reproduce the `request_outcomes` published
+   beside those bytes, exactly.
+
+The third condition is the one that matters most. The hash proves the bytes are
+the published bytes; the crosscheck proves that today's aggregator, reading
+them, still gets the numbers that were published on the day. If the counting
+rules ever drift, a delta built on a recomputed side would silently be measuring
+that drift instead of the web.
+
+Any output whose numbers were regenerated this way says so:
+`before.aggregates_source` reads `recomputed-from-verified-bytes` rather than
+`published-manifest`. A reader of a delta is entitled to know which side was
+recomputed today.
+
+Recomputation does not soften the comparability gate — it is what allows the
+gate to be *reached*. The two published captures still refuse to be differenced,
+now for the substantive reason rather than a structural one.
+
 ## Input provenance
 
 `data/domains/tranco-74V8X-1000.csv` contains ranks 1-1000 from Tranco list

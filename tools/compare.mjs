@@ -10,13 +10,25 @@
 // output as a named confounder, so a delta produced across a vantage change
 // cannot be quoted without the vantage change travelling attached to it.
 //
+// A manifest that predates the `aggregates` block is still admissible. The one
+// capture this whole comparison exists for — the immutable pre-September-15
+// baseline — is schema v1 and can never be regenerated in place, so its
+// aggregates are recomputed from its own bytes, admitted only when those bytes
+// hash to the SHA-256 the manifest published. That is a load-bearing distinction:
+// a refusal for a STRUCTURAL reason would mask whether the substantive gate below
+// works at all, and an exit code that never reached the gate would still read
+// like the gate holding.
+//
 // Usage:
 //   node tools/compare.mjs --before A.manifest.json --after B.manifest.json
+//                          [--before-capture FILE] [--after-capture FILE]
 //                          [--acknowledge <dimension>]... [--out FILE]
-// Exit codes: 0 comparable (or fully acknowledged), 2 usage, 3 delta withheld.
+// Exit codes: 0 comparable (or fully acknowledged), 2 usage/load failure,
+//             3 delta withheld.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { PUBLISHED, loadManifestAggregates } from './capture.mjs';
 import { COMPARABILITY_DIMENSIONS, UNRECORDED, dimensionValue, dimensionsAgree } from './policy.mjs';
 
 const WITHHELD = 3;
@@ -63,7 +75,11 @@ export function compareAggregates(a, b) {
   };
 }
 
-export function compareManifests(beforeManifest, afterManifest, { acknowledge = [] } = {}) {
+export function compareManifests(
+  beforeManifest,
+  afterManifest,
+  { acknowledge = [], aggregatesSource = {} } = {},
+) {
   const acknowledged = new Set(acknowledge);
   const unknown = [...acknowledged].filter((d) => !COMPARABILITY_DIMENSIONS.includes(d));
   if (unknown.length) {
@@ -102,11 +118,15 @@ export function compareManifests(beforeManifest, afterManifest, { acknowledge = 
       capture_id: beforeManifest.capture_id ?? null,
       observed_from: beforeManifest.observed_from ?? null,
       instrument_commit: beforeManifest.instrument_commit ?? null,
+      // A reader of a delta is entitled to know which side's numbers were
+      // regenerated today rather than published on the night of the capture.
+      aggregates_source: aggregatesSource.before ?? PUBLISHED,
     },
     after: {
       capture_id: afterManifest.capture_id ?? null,
       observed_from: afterManifest.observed_from ?? null,
       instrument_commit: afterManifest.instrument_commit ?? null,
+      aggregates_source: aggregatesSource.after ?? PUBLISHED,
     },
     dimensions,
     confounders,
@@ -124,14 +144,17 @@ export function compareManifests(beforeManifest, afterManifest, { acknowledge = 
   };
 }
 
-function readManifest(path) {
-  const manifest = JSON.parse(readFileSync(path, 'utf8'));
-  if (!manifest.aggregates) {
-    throw new Error(
-      `${path} carries no aggregates: regenerate it with tools/finalize-run.mjs, or aggregate the capture bytes first`,
-    );
+/**
+ * A side of the comparison: the manifest, plus aggregates from wherever they can
+ * honestly be got. `side` only shapes the error message, so an operator is told
+ * which flag to reach for.
+ */
+function readSide(path, capturePath, side) {
+  try {
+    return loadManifestAggregates(path, { capturePath });
+  } catch (err) {
+    throw new Error(String(err.message || err).replace('--{side}-capture', `--${side}-capture`));
   }
-  return manifest;
 }
 
 async function main() {
@@ -145,11 +168,17 @@ async function main() {
   const out = opt('--out');
   const acknowledge = args.flatMap((a, i) => (a === '--acknowledge' && args[i + 1] ? [args[i + 1]] : []));
   if (!before || !after) {
-    console.error('usage: node tools/compare.mjs --before A.manifest.json --after B.manifest.json [--acknowledge DIM]... [--out FILE]');
+    console.error('usage: node tools/compare.mjs --before A.manifest.json --after B.manifest.json [--before-capture FILE] [--after-capture FILE] [--acknowledge DIM]... [--out FILE]');
     process.exit(2);
   }
 
-  const result = compareManifests(readManifest(before), readManifest(after), { acknowledge });
+  const b = readSide(before, opt('--before-capture'), 'before');
+  const a = readSide(after, opt('--after-capture'), 'after');
+  const result = compareManifests(
+    { ...b.manifest, aggregates: b.aggregates },
+    { ...a.manifest, aggregates: a.aggregates },
+    { acknowledge, aggregatesSource: { before: b.source, after: a.source } },
+  );
   const json = `${JSON.stringify(result, null, 2)}\n`;
   if (out) writeFileSync(out, json);
   else process.stdout.write(json);
