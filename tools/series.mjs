@@ -34,8 +34,20 @@
 // partner's manifest is re-read in `compare` mode and must agree with what its
 // tag implied, or the comparison refuses rather than proceeding on the filename.
 //
+// A TRUNCATED CANDIDATE LIST IS NOT AN EMPTY ONE. The caller lists releases with
+// `gh release list --limit N`, newest-first. If the partner has fallen off the end
+// of that window, `selectPartner` finds nothing and says "no prior capture in this
+// slot" — exit 4, which the nightly correctly treats as the ordinary state of the
+// first night in a slot and passes silently. So a bound that is merely reached
+// converts "I could not see the partner" into "there is no partner", and the
+// series goes on looking alive while measuring nothing: trap 1 above, arriving
+// through the release-list limit instead of through the selection rule. `--releases-limit`
+// makes that distinguishable — a full window with no partner refuses (exit 2)
+// instead of reporting absence.
+//
 // Usage:
-//   node tools/series.mjs select  --releases R.json --current-tag TAG [--out F]
+//   node tools/series.mjs select  --releases R.json --current-tag TAG
+//                                 [--releases-limit N] [--out F]
 //   node tools/series.mjs compare --pair P.json --prior-manifest M.json
 //                                 --current-manifest M.json [--prior-capture F]
 //                                 [--current-capture F] [--out F]
@@ -165,6 +177,19 @@ function doSelect(args) {
   }
   const releases = readJson(releasesPath, 'release list');
   if (!Array.isArray(releases)) throw new Error('release list must be a JSON array');
+  // Refused rather than coerced. `Number('lots')` is NaN and `Number(null)` is 0,
+  // so a typo'd limit would quietly turn the truncation guard off and leave a
+  // caller believing it was armed — the same reason compare.mjs throws on an
+  // unrecognised --acknowledge instead of ignoring it.
+  const limitRaw = opt('--releases-limit');
+  let limit = null;
+  if (limitRaw !== null) {
+    limit = Number(limitRaw);
+    if (!Number.isInteger(limit) || limit <= 0) {
+      console.error(`--releases-limit must be a positive integer, got: ${limitRaw}`);
+      return COULD_NOT_PERFORM;
+    }
+  }
   const pair = selectPartner(releases, currentTag);
   const out = opt('--out');
   // `--print-tag` exists so a caller does not have to parse the pair file with a
@@ -177,6 +202,16 @@ function doSelect(args) {
     emit(pair, out);
   }
   if (!pair.partner) {
+    // Only when the current capture HAD a slot: a hand-run capture is refused for
+    // claiming no repeatable slot, which no amount of extra candidates would change.
+    if (limit !== null && releases.length >= limit && pair.current_slot !== UNRECORDED) {
+      console.error(
+        `no partner found, but the release list is at its ${limit}-item limit\n` +
+          '  a full window cannot distinguish "no prior capture in this slot" from\n' +
+          '  "the prior capture is older than the window"; refusing rather than reporting absence',
+      );
+      return COULD_NOT_PERFORM;
+    }
     console.error(`no series partner: ${pair.reason}`);
     return NO_PARTNER;
   }

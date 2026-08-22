@@ -445,4 +445,155 @@ assert.throws(
   }
 }
 
+// --- an undefined quantity is not zero ---------------------------------------
+//
+// `rate()` is null when nothing was sent, and `null` coerces to 0 under `-`. The
+// three cases below are the three ways that lies, and the FIRST is the one that
+// matters: a night on which the instrument sent nothing looks identical, in the
+// published number, to a night on which the web refused everything.
+
+{
+  const dark = aggregates({ requests_sent: 0, outcomes: { reachable: 0, denied_by_robots: 10 } });
+  const lit = aggregates({ requests_sent: 8, outcomes: { reachable: 4 } });
+
+  // Positive control: the null side is REACHABLE, not hypothetical. Without this
+  // the three assertions below could all be about a branch nothing enters.
+  assert.equal(compareAggregates(dark, dark).reachable_rate_of_sent.before, null,
+    'a capture that sent nothing must have no rate at all');
+
+  const wentDark = compareAggregates(lit, dark).reachable_rate_of_sent;
+  assert.equal(wentDark.before, 0.5);
+  assert.equal(wentDark.after, null);
+  assert.equal(wentDark.change, null,
+    'the instrument going quiet must not publish as the web going dark');
+
+  const cameBack = compareAggregates(dark, lit).reachable_rate_of_sent;
+  assert.equal(cameBack.change, null);
+
+  const neverKnown = compareAggregates(dark, dark).reachable_rate_of_sent;
+  assert.equal(neverKnown.change, null,
+    'two nights whose rate was never known are not thereby known to be unchanged');
+
+  // And the counts beside it are still real subtraction, so the rule above is a
+  // rule about undefined quantities rather than a tool that stopped subtracting.
+  // An absent outcome CATEGORY is genuinely zero occurrences — unlike an absent
+  // rate, which is a quantity nobody measured — so `lit` contributes 0 here.
+  assert.equal(compareAggregates(lit, dark).outcomes.denied_by_robots.change, 10);
+}
+
+// --- a change carries no more precision than its own sides -------------------
+//
+// The fixture used elsewhere in this file is 0.5 -> 0.125, whose difference is
+// binary-exact, so it could never have shown this. These numerators are chosen so
+// the naive subtraction is NOT exact: 0.507 - 0.407 is -0.09999999999999998.
+
+{
+  const before = aggregates({ requests_sent: 1000, outcomes: { reachable: 507 } });
+  const after = aggregates({ requests_sent: 1000, outcomes: { reachable: 407 } });
+  const d = compareAggregates(before, after).reachable_rate_of_sent;
+  assert.equal(d.before, 0.507);
+  assert.equal(d.after, 0.407);
+  assert.equal(d.change, -0.1, 'the change must round at the precision of the sides');
+  // Stated as a property too, so a future precision change cannot pass by moving
+  // the literal above: the change must survive a round-trip at the sides' own scale.
+  const digits = (n) => (String(n).split('.')[1] ?? '').length;
+  assert.ok(digits(d.change) <= Math.max(digits(d.before), digits(d.after)),
+    'the change must not carry digits its operands never had');
+}
+
+// --- the robots verdict stays split ------------------------------------------
+//
+// `outcomes.denied_by_robots` is `denied + unknown`. On the two real published
+// captures those two moved in OPPOSITE directions (+5 refusals, -10 unreadable)
+// and the flattened count reported -5 — the opposite sign from the only component
+// that is a fact about the web. These numbers reproduce that shape.
+
+{
+  const policy = (allowed, denied, unknown) => ({
+    browser: { allowed, denied, unknown },
+    gptbot: { allowed, denied, unknown },
+  });
+  const before = aggregates({ robots_policy: policy(193, 14, 793), outcomes: { reachable: 4, denied_by_robots: 807 } });
+  const after = aggregates({ robots_policy: policy(194, 15, 791), outcomes: { reachable: 4, denied_by_robots: 806 } });
+  const d = compareAggregates(before, after);
+
+  assert.equal(d.outcomes.denied_by_robots.change, -1, 'the flattened count fell');
+  assert.equal(d.robots_policy.browser.denied.change, 1, 'while refusals by the host rose');
+  assert.equal(d.robots_policy.browser.unknown.change, -2);
+  assert.equal(d.robots_policy.gptbot.denied.change, 1);
+  // The whole reason the split is published: the sign of the sum is not the sign
+  // of the component a reader would quote it for.
+  assert.notEqual(
+    Math.sign(d.outcomes.denied_by_robots.change),
+    Math.sign(d.robots_policy.browser.denied.change),
+    'this fixture must actually exhibit the sign inversion it exists to demonstrate',
+  );
+
+  // A dialect present on only one night was NOT OBSERVED on the other. Reading it
+  // as zero would publish "denied rose from 0 to 15" for a dialect never probed.
+  const added = aggregates({
+    robots_policy: { ...policy(194, 15, 791), claudebot: { allowed: 180, denied: 28, unknown: 792 } },
+  });
+  const grown = compareAggregates(before, added).robots_policy;
+  assert.equal(grown.claudebot.denied.before, null);
+  assert.equal(grown.claudebot.denied.after, 28);
+  assert.equal(grown.claudebot.denied.change, null,
+    'a dialect the earlier capture never probed has no change, not a rise from zero');
+  assert.equal(grown.browser.denied.change, 1, 'dialects observed on both nights still subtract');
+
+  // A capture with no robots_policy at all yields an empty map, not a throw: v1
+  // manifests predate the block and are admitted by recomputation.
+  assert.deepEqual(compareAggregates(aggregates(), aggregates()).robots_policy, {});
+}
+
+// --- the artifact is byte-reproducible ---------------------------------------
+//
+// Key order in a manifest follows the order categories were first seen while
+// aggregating, so two nights genuinely disagree on it — the real published
+// captures list `outcomes` as denied_by_robots, redirected, reachable, ... rather
+// than alphabetically. If the delta inherited that order, a reader diffing two
+// nights' artifacts would see changes that are nothing but ordering.
+
+{
+  const forward = aggregates({
+    outcomes: { reachable: 4, challenged: 2, denied_by_robots: 2 },
+    robots_policy: { gptbot: { allowed: 1, denied: 2, unknown: 3 }, browser: { allowed: 1, denied: 2, unknown: 3 } },
+  });
+  const shuffled = aggregates({
+    outcomes: { denied_by_robots: 2, reachable: 4, challenged: 2 },
+    robots_policy: { browser: { unknown: 3, allowed: 1, denied: 2 }, gptbot: { denied: 2, unknown: 3, allowed: 1 } },
+  });
+
+  // The control: these two really are in different orders, or the assertions
+  // below compare a thing to itself.
+  assert.notDeepEqual(Object.keys(forward.outcomes), Object.keys(shuffled.outcomes));
+
+  const a = compareAggregates(forward, shuffled);
+  const b = compareAggregates(shuffled, forward);
+  assert.deepEqual(Object.keys(a.outcomes), Object.keys(b.outcomes), 'key order must not depend on input order');
+  assert.deepEqual(Object.keys(a.outcomes), ['challenged', 'denied_by_robots', 'reachable']);
+  assert.deepEqual(Object.keys(a.robots_policy), ['browser', 'gptbot']);
+  assert.deepEqual(Object.keys(a.robots_policy.browser), ['allowed', 'denied', 'unknown']);
+  // Same captures, same bytes: the whole artifact, not just its key lists.
+  assert.equal(JSON.stringify(a), JSON.stringify(compareAggregates(forward, shuffled)));
+}
+
+// --- `caveat` names acknowledged confounders only ----------------------------
+
+{
+  const moved = manifest({
+    vantage: { id: 'home', class: 'residential-fixed-line' },
+    instrument_policy: { ...INSTRUMENT_POLICY, robots_unavailable: 'fail-open' },
+  });
+  const withheld = compareManifests(manifest(), moved, { acknowledge: ['vantage.class'] });
+  assert.equal(withheld.comparable, false);
+  assert.match(withheld.caveat, /vantage\.class/);
+  assert.doesNotMatch(withheld.caveat, /robots_unavailable/,
+    'a dimension nobody acknowledged must not be printed under the word "acknowledged"');
+
+  // Nothing acknowledged at all leaves no caveat to mis-read.
+  assert.equal(compareManifests(manifest(), moved).caveat, null);
+}
+
+
 console.log('cross-capture gate: delta arithmetic, withholding, acknowledgement, v1 admission and exit codes passed');

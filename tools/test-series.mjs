@@ -220,11 +220,12 @@ assert.equal(good.code, 0, `expected a released delta, got ${good.code}: ${good.
 const out = JSON.parse(good.stdout);
 assert.equal(out.comparison.strictly_comparable, true);
 assert.equal(out.comparison.delta.outcomes.reachable.change, -500);
-// Compared to a tolerance, not exactly: `delta()` subtracts two 4dp-rounded
-// rates without rounding the difference, so this arrives as -0.09999999999999998.
-// Noted on #2 as a presentation fix for the published artifact; asserting the
-// float here would only freeze the noise in place.
-assert.ok(Math.abs(out.comparison.delta.reachable_rate_of_sent.change - -0.1) < 1e-9);
+// Compared EXACTLY, now that `delta()` rounds the change at the precision of the
+// sides it was computed from. This assertion used to carry a 1e-9 tolerance
+// because the same subtraction arrived as -0.09999999999999998 — the noise the
+// tolerance was hiding is the defect #29 removed, and a tolerance here would go
+// on passing if it came back.
+assert.equal(out.comparison.delta.reachable_rate_of_sent.change, -0.1);
 assert.equal(out.selection.partner.tag, lastNight);
 
 {
@@ -271,6 +272,50 @@ assert.equal(out.selection.partner.tag, lastNight);
   const r = run(['compare', '--pair', pairPath, '--prior-manifest', v1, '--current-manifest', currentM]);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /carries no aggregates/);
+}
+
+// A TRUNCATED CANDIDATE LIST IS NOT AN EMPTY ONE.
+//
+// `gh release list --limit N` is newest-first. If the partner has aged off the end
+// of that window, the selector finds nothing and says "no prior capture in this
+// slot" — exit 4, which the nightly treats as the ordinary first night and passes
+// silently. So a full window must refuse (exit 2) rather than report absence.
+{
+  const window = [published(tonight, '2026-08-23T09:20:00Z'), published('baseline-2026-08-22T0815Z', '2026-08-22T08:43:09Z')];
+
+  // The same list, one item short of its limit, is a genuine absence: exit 4. This
+  // is the control — without it the refusal below could be firing on any full list.
+  const room = run(['select', '--releases', write(window), '--current-tag', tonight, '--releases-limit', '3', '--out', join(root, 'room.json')]);
+  assert.equal(room.code, 4, 'a window with room to spare reports absence');
+
+  const full = run(['select', '--releases', write(window), '--current-tag', tonight, '--releases-limit', '2', '--out', join(root, 'full.json')]);
+  assert.equal(full.code, 2, 'a full window cannot tell absence from truncation');
+  assert.match(full.stderr, /limit/);
+
+  // A full window that DID find a partner is unaffected: truncation only matters
+  // when the answer was "nothing found".
+  const found = run(['select', '--releases', write([published(tonight, '2026-08-23T09:20:00Z'), published(lastNight, '2026-08-22T09:20:00Z')]), '--current-tag', tonight, '--releases-limit', '2', '--out', join(root, 'found.json')]);
+  assert.equal(found.code, 0);
+
+  // A hand-run capture claims no repeatable slot, and no number of extra
+  // candidates would give it one. That refusal must stay exit 4 even on a full
+  // window, or every manual dispatch starts failing its own series step.
+  const manualTag = 'baseline-2026-08-22T162332Z-manual-gh5a1';
+  const manual = run(['select', '--releases', write([published(manualTag, '2026-08-22T16:23:00Z'), published(lastNight, '2026-08-22T09:20:00Z')]), '--current-tag', manualTag, '--releases-limit', '2', '--out', join(root, 'manual.json')]);
+  assert.equal(manual.code, 4, 'a slotless capture is refused for its slot, not for the window');
+
+  // Omitting the flag preserves the old behaviour exactly, so a caller that does
+  // not know its own limit is never given a refusal it cannot act on.
+  const unbounded = run(['select', '--releases', write(window), '--current-tag', tonight, '--out', join(root, 'unbounded.json')]);
+  assert.equal(unbounded.code, 4);
+
+  // A limit that is not a positive integer is REFUSED, not coerced. `Number('lots')`
+  // is NaN and would silently disarm the guard while the caller believed it armed.
+  for (const bad of ['lots', '0', '-1', '2.5']) {
+    const r = run(['select', '--releases', write(window), '--current-tag', tonight, '--releases-limit', bad, '--out', join(root, `bad-${bad}.json`)]);
+    assert.equal(r.code, 2, `--releases-limit ${bad} must refuse`);
+    assert.match(r.stderr, /positive integer/);
+  }
 }
 
 rmSync(root, { recursive: true, force: true });

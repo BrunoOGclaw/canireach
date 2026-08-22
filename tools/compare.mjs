@@ -33,22 +33,93 @@ import { COMPARABILITY_DIMENSIONS, UNRECORDED, dimensionValue, dimensionsAgree }
 
 const WITHHELD = 3;
 
-/** Signed change plus the two sides, so a reader never has to reconstruct them. */
-function delta(before, after) {
-  return { before, after, change: after - before };
+// The precision the rates are published at. One constant, read by both the side
+// and the change computed from it, so a change can never carry digits its own
+// operands never had.
+const RATE_PRECISION = 4;
+
+const round = (value, precision) => Number(value.toFixed(precision));
+
+const unionKeys = (a = {}, b = {}) => [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+
+/**
+ * Signed change plus the two sides, so a reader never has to reconstruct them.
+ *
+ * A `null` side is an UNDEFINED quantity, not zero, and the change across one is
+ * `null` rather than a number. JavaScript's `-` coerces `null` to `0`, so the
+ * obvious `after - before` publishes a rate that went undefined as a measured
+ * collapse (`0.491 -> null` became `change: -0.491`) and two undefined rates as
+ * `change: 0` — "no change" between two nights whose rate was never known. That
+ * is `unrecorded` never equalling `unrecorded` (tools/policy.mjs), violated one
+ * layer down in arithmetic instead of in a comparison, and it is reachable in
+ * exactly the direction this project watches: `requests_sent` collapses toward
+ * zero when robots.txt goes unreadable across the population and the instrument
+ * fails closed. The instrument going dark and the web going dark must not
+ * produce the same published number.
+ *
+ * `precision` rounds the change at the precision of the sides. Without it a
+ * 0.507 -> 0.407 change publishes as `-0.09999999999999998`, into an artifact the
+ * launch post cites.
+ */
+function delta(before, after, { precision } = {}) {
+  // `== null` deliberately, covering both null and undefined in one test: an
+  // absent side reaching here as `undefined` would otherwise be dropped from the
+  // JSON entirely, which reads as a field that was never computed.
+  if (before == null || after == null) {
+    return { before: before ?? null, after: after ?? null, change: null };
+  }
+  const change = after - before;
+  return { before, after, change: precision === undefined ? change : round(change, precision) };
 }
 
 /** Counter maps are compared over the UNION of keys: a category that vanished is a finding. */
 function countDelta(before = {}, after = {}) {
   const out = {};
-  for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+  for (const key of unionKeys(before, after)) {
     out[key] = delta(before[key] ?? 0, after[key] ?? 0);
   }
   return out;
 }
 
+/**
+ * The robots verdict, per dialect, kept SPLIT.
+ *
+ * `outcomes.denied_by_robots` is the sum of two facts that mean opposite things:
+ * the site's robots.txt was read and says no, and the site's robots.txt could not
+ * be read at all so this instrument failed closed. On the real capture the split
+ * is exact across every dialect — `denied + unknown = denied_by_robots` — and only
+ * the first is a fact about the host. A delta that publishes the sum and not the
+ * split reports our own compliance as the web's hostility, which is the finding
+ * from the traveler's answer engine (#17) arriving one layer out, in the artifact
+ * that carries the September-15 claim. That claim is precisely a claim about
+ * WHICH of the two moved.
+ *
+ * A dialect ABSENT from one capture was not observed by it. Unlike an absent
+ * outcome category — which means the outcome occurred zero times — an absent
+ * dialect means the instrument never asked, so its counters are undefined and
+ * their changes are `null`. Reading them as zero would publish "denied rose from
+ * 0 to 27" for a dialect that was simply not probed: the same fabricated change
+ * `delta` above now refuses for an undefined rate.
+ */
+function policyDelta(before = {}, after = {}) {
+  const out = {};
+  for (const dialect of unionKeys(before, after)) {
+    const b = before[dialect];
+    const a = after[dialect];
+    const observedBoth = Boolean(b) && Boolean(a);
+    const counters = {};
+    for (const key of unionKeys(b ?? {}, a ?? {})) {
+      counters[key] = observedBoth
+        ? delta(b[key] ?? 0, a[key] ?? 0)
+        : delta(b?.[key] ?? null, a?.[key] ?? null);
+    }
+    out[dialect] = counters;
+  }
+  return out;
+}
+
 function rate(numerator, denominator) {
-  return denominator ? Number((numerator / denominator).toFixed(4)) : null;
+  return denominator ? round(numerator / denominator, RATE_PRECISION) : null;
 }
 
 export function compareAggregates(a, b) {
@@ -63,13 +134,16 @@ export function compareAggregates(a, b) {
     reachable_rate_of_sent: delta(
       rate(a.outcomes?.reachable ?? 0, sentBefore),
       rate(b.outcomes?.reachable ?? 0, sentAfter),
+      { precision: RATE_PRECISION },
     ),
     outcomes: countDelta(a.outcomes, b.outcomes),
+    // Published BESIDE outcomes, never folded into them: `denied_by_robots` above
+    // is `denied + unknown` and cannot answer which one moved.
+    robots_policy: policyDelta(a.robots_policy, b.robots_policy),
     challenges: countDelta(a.challenges, b.challenges),
     toll: countDelta(a.toll, b.toll),
     affordances: Object.fromEntries(
-      [...new Set([...Object.keys(a.affordances ?? {}), ...Object.keys(b.affordances ?? {})])]
-        .sort()
+      unionKeys(a.affordances, b.affordances)
         .map((id) => [id, delta(a.affordances?.[id]?.present ?? 0, b.affordances?.[id]?.present ?? 0)]),
     ),
   };
@@ -137,9 +211,15 @@ export function compareManifests(
     withheld_reason: comparable
       ? null
       : `instrument differs on ${blocking.join(', ')}; any delta would describe the instrument, not the web`,
-    // Travels with the numbers so it cannot be dropped in transcription.
-    caveat: confounders.length
-      ? `acknowledged confounders: ${confounders.map((c) => c.dimension).join(', ')}`
+    // Travels with the numbers so it cannot be dropped in transcription. It names
+    // ACKNOWLEDGED confounders only: mapping over every confounder printed
+    // dimensions nobody acknowledged under the word "acknowledged", which is a
+    // false sentence in the one line built to survive being quoted. When a delta
+    // is emitted the two sets coincide — an unacknowledged confounder is blocking
+    // — so this narrowing changes only the withheld output, where `blocking_dimensions`
+    // and `confounders` already carry the full picture.
+    caveat: confounders.some((c) => c.acknowledged)
+      ? `acknowledged confounders: ${confounders.filter((c) => c.acknowledged).map((c) => c.dimension).join(', ')}`
       : null,
   };
 }
