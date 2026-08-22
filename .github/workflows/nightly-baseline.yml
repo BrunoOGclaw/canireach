@@ -262,12 +262,18 @@ jobs:
         run: |
           set -euo pipefail
           tag="baseline-${CAPTURE_ID}"
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+          # The limit is load-bearing, so it is named once and handed to the
+          # selector rather than left implicit: a list that came back FULL cannot
+          # tell "no prior capture in this slot" from "the prior capture is older
+          # than this window", and only the first is exit 4 (a silent pass).
+          releases_limit=100
+          gh release list --repo "$GITHUB_REPOSITORY" --limit "$releases_limit" \
             --json tagName,createdAt,isDraft,isImmutable > releases.json
 
           set +e
           partner=$(node tools/series.mjs select \
-            --releases releases.json --current-tag "$tag" --out pair.json --print-tag)
+            --releases releases.json --current-tag "$tag" \
+            --releases-limit "$releases_limit" --out pair.json --print-tag)
           select_code=$?
           set -e
           # 4 is "no prior capture in this slot yet" — the normal state of the
