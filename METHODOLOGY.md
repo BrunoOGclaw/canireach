@@ -65,8 +65,26 @@ manifest records the instrument's comparability profile alongside its vantage,
 and `tools/compare.mjs` refuses to emit a delta between two captures that
 disagree on any of these dimensions:
 
-`vantage.class`, `input.sha256`, and the instrument's row schema version,
-robots-unavailable policy, redirect policy, denial gate, and dialect set.
+`vantage.class`, `observation_window.slot`, `input.sha256`, and the instrument's
+row schema version, robots-unavailable policy, redirect policy, denial gate, and
+dialect set.
+
+`observation_window.slot` is the repeatable local slot a capture was taken in —
+`04:17[America/Chicago]` — and it is on the list because everything else on it
+describes how the instrument was *configured* and none of it described *when it
+looked*. The first two captures of the automated series agreed on every other
+dimension and were taken fourteen hours apart, at 09:45 and 04:17 local; the
+gate reported them strictly comparable with zero confounders. Rate limits,
+challenge rates and CDN behaviour are not hour-invariant, so a delta across that
+pairing would have described the time of day.
+
+The slot is nominal, not observed: a run that fires in the 05:17 fallback is
+still satisfying the 04:17 slot, so schedule slip does not fragment the series.
+The slip is published beside the slot as `drift_minutes` rather than folded into
+it, because an hour of slip that silently reshaped a comparability dimension
+would be a confounder reading as a control. A hand-dispatched capture has no
+repeatable slot and is `unrecorded`, so it can never be differenced against a
+nightly one — including against another manual capture.
 
 A dimension that a manifest does not record reads as `unrecorded`, and
 `unrecorded` never equals anything — including another `unrecorded`. Two

@@ -44,9 +44,18 @@ export const INSTRUMENT_POLICY = {
  *
  * `input.sha256` is here because a delta across two different domain lists is
  * not a delta at all; it will matter the day the list grows past the top 1,000.
+ *
+ * `observation_window.slot` is here because everything else on this list
+ * describes how the instrument was CONFIGURED, and none of it described WHEN it
+ * looked. The first two captures from the automated series agree on every other
+ * dimension and were taken at 09:45 and 04:17 local — fourteen hours apart —
+ * and the gate called that strictly comparable, zero confounders. Rate limits,
+ * challenge rates and CDN behaviour are not hour-invariant, so a delta across
+ * that pairing would have described the time of day.
  */
 export const COMPARABILITY_DIMENSIONS = [
   'vantage.class',
+  'observation_window.slot',
   'input.sha256',
   'instrument_policy.row_schema_version',
   'instrument_policy.robots_unavailable',
@@ -54,6 +63,68 @@ export const COMPARABILITY_DIMENSIONS = [
   'instrument_policy.denial_gate',
   'instrument_policy.dialects',
 ];
+
+/**
+ * The repeatable observation slot, derived from the schedule rather than from
+ * the clock. A run that fires in the 05:17 fallback is still satisfying the
+ * 04:17 slot, so the slot is the NOMINAL local time, and the drift from it is
+ * published separately instead of being folded in — an hour of schedule slip
+ * that silently reshaped a dimension would be the confounder-that-reads-as-a-
+ * control failure all over again.
+ *
+ * A manual dispatch has no repeatable slot: it happened at whatever hour an
+ * operator ran it. That is `unrecorded`, and `unrecorded` never equals
+ * anything, including another `unrecorded`. Two hand-run captures are not
+ * thereby known to share an hour. The instant itself stays in `observed_from`
+ * for anyone who wants it; what it is not is a slot.
+ *
+ * `scheduled_slot` is emitted by the workflow as `YYYY-MM-DDTHH:MM:SS[Zone]`
+ * or the literal `manual`.
+ */
+export function observationWindow(scheduledSlot, observedFrom) {
+  // RFC 9557 form, with the UTC offset optional: the workflow emits the bare
+  // `YYYY-MM-DDTHH:MM:SS[Zone]`, but the offset-bearing spelling is valid and
+  // a slot string that failed to parse would silently read as `unrecorded`.
+  const parsed = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?\[([^\]]+)\]$/.exec(
+    String(scheduledSlot ?? ''),
+  );
+  if (!parsed) {
+    return { slot: UNRECORDED, nominal: null, observed_local: null, drift_minutes: null };
+  }
+  const [, date, hhmm, zone] = parsed;
+  const observedLocal = observedFrom ? localTime(observedFrom, zone) : null;
+  return {
+    // The dimension. Date-free on purpose: two different nights at the same
+    // hour are the comparison this project is built to make.
+    slot: `${hhmm}[${zone}]`,
+    nominal: `${date}T${hhmm}[${zone}]`,
+    observed_local: observedLocal,
+    drift_minutes: observedLocal === null ? null : minutesBetween(hhmm, observedLocal),
+  };
+}
+
+function localTime(iso, zone) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(iso));
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return `${get('hour')}:${get('minute')}`;
+}
+
+/** Signed minutes from nominal to observed, wrapped to the nearer side of midnight. */
+function minutesBetween(nominal, observed) {
+  const mins = (hhmm) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + m;
+  };
+  let diff = mins(observed) - mins(nominal);
+  if (diff > 720) diff -= 1440;
+  if (diff < -720) diff += 1440;
+  return diff;
+}
 
 /**
  * Read a dotted path out of a manifest. A manifest that predates a dimension

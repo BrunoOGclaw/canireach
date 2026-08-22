@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { compareManifests, compareAggregates } from './compare.mjs';
 import { PUBLISHED, RECOMPUTED } from './capture.mjs';
-import { INSTRUMENT_POLICY } from './policy.mjs';
+import { INSTRUMENT_POLICY, observationWindow } from './policy.mjs';
 
 const COMPARE = fileURLToPath(new URL('./compare.mjs', import.meta.url));
 
@@ -35,6 +35,7 @@ const manifest = (over = {}) => ({
   observed_from: '2026-08-23T09:17:00.000Z',
   instrument_commit: 'a'.repeat(40),
   vantage: { id: 'github-actions-ubuntu-dynamic', class: 'github-hosted-dynamic-egress' },
+  observation_window: observationWindow('2026-08-23T04:17:00[America/Chicago]', '2026-08-23T09:17:00.000Z'),
   instrument_policy: INSTRUMENT_POLICY,
   input: { name: 'data/domains/tranco-74V8X-1000.csv', sha256: 'f'.repeat(64) },
   aggregates: aggregates(),
@@ -134,6 +135,89 @@ const manifest = (over = {}) => ({
   const bare = manifest({ vantage: { id: 'x' } });
   const result = compareManifests(bare, manifest({ vantage: { id: 'y' } }));
   assert.ok(result.blocking_dimensions.includes('vantage.class'));
+}
+
+// --- the hour is a dimension, because it was not one and it should have been --
+//
+// The regression this exists for, verified against the real manifests before it
+// was written: the manual 2026-08-22T144501Z capture (09:45 local) and a
+// scheduled 04:17 capture agree on vantage class, input list and every
+// instrument-policy dimension. compare.mjs reported `strictly_comparable: true`
+// with ZERO confounders and emitted a delta across fourteen hours of clock.
+{
+  const nightly = manifest();
+  const morning = manifest({
+    capture_id: '2026-08-22T144501Z-manual-gh32579618177a1',
+    observed_from: '2026-08-22T14:45:10.080Z',
+    observation_window: observationWindow('manual', '2026-08-22T14:45:10.080Z'),
+  });
+
+  const result = compareManifests(morning, nightly);
+  assert.equal(result.comparable, false, 'a hand-run daytime capture is not a nightly capture');
+  assert.equal(result.delta, null);
+  assert.deepEqual(result.blocking_dimensions, ['observation_window.slot']);
+  // Everything else genuinely does agree — which is exactly why this pairing was
+  // dangerous, and why asserting the OTHER dimensions still match is the vacuity
+  // guard here. A gate that blocked on everything would also "catch" this.
+  assert.equal(result.dimensions['vantage.class'].equal, true);
+  assert.equal(result.dimensions['input.sha256'].equal, true);
+  assert.equal(result.dimensions['instrument_policy.robots_unavailable'].equal, true);
+  assert.equal(result.dimensions['observation_window.slot'].before, 'unrecorded');
+  assert.equal(result.dimensions['observation_window.slot'].after, '04:17[America/Chicago]');
+
+  // Two different nights at the same slot are the comparison this project is
+  // built to make, and they must still pass.
+  const tomorrow = manifest({
+    capture_id: '2026-08-24-slot0417-America_Chicago-schedule-gh3a1',
+    observed_from: '2026-08-24T09:17:00.000Z',
+    observation_window: observationWindow('2026-08-24T04:17:00[America/Chicago]', '2026-08-24T09:17:00.000Z'),
+  });
+  const across = compareManifests(nightly, tomorrow);
+  assert.equal(across.comparable, true, 'the slot is date-free: two nights at 04:17 are comparable');
+  assert.equal(across.strictly_comparable, true);
+  assert.ok(across.delta);
+
+  // The 05:17 fallback slot exists because GitHub schedules slip. A run that
+  // fires late still satisfies the 04:17 slot, so it must NOT poison the series
+  // — but the slip must not be invisible either.
+  const late = observationWindow('2026-08-24T04:17:00[America/Chicago]', '2026-08-24T10:19:00.000Z');
+  assert.equal(late.slot, '04:17[America/Chicago]', 'a late run still satisfies its slot');
+  assert.equal(late.drift_minutes, 62, 'and the slip is published rather than folded away');
+  assert.equal(compareManifests(nightly, manifest({ observation_window: late })).comparable, true);
+
+  // Two hand-run captures are not thereby known to share an hour.
+  const otherManual = manifest({ observation_window: observationWindow('manual', '2026-08-22T03:00:00.000Z') });
+  assert.equal(compareManifests(morning, otherManual).comparable, false, 'unrecorded never equals unrecorded');
+}
+
+// Derivation: on time, late, manual, and a malformed slot string.
+{
+  const onTime = observationWindow('2026-08-23T04:17:00[America/Chicago]', '2026-08-23T09:17:04.000Z');
+  assert.equal(onTime.slot, '04:17[America/Chicago]');
+  assert.equal(onTime.observed_local, '04:17');
+  assert.equal(onTime.drift_minutes, 0);
+
+  // Across midnight the drift must take the nearer side. Both branches of the
+  // wrap are exercised on purpose: the first version of this test used 00:05
+  // nominal against 00:03 observed, which subtracts to -2 without ever reaching
+  // the wrap, so it would have passed with the wrap deleted. Fault injection
+  // caught that, not review.
+  //
+  // Fired seven minutes EARLY across midnight: nominal 00:05 local, observed
+  // 23:58 the previous day. Naive subtraction gives +1433.
+  const early = observationWindow('2026-08-23T00:05:00[America/Chicago]', '2026-08-23T04:58:00.000Z');
+  assert.equal(early.observed_local, '23:58');
+  assert.equal(early.drift_minutes, -7, 'a run seven minutes early is -7, not +1433');
+
+  // And seven minutes LATE across midnight: nominal 23:58, observed 00:05.
+  // Naive subtraction gives -1433.
+  const late2 = observationWindow('2026-08-23T23:58:00[America/Chicago]', '2026-08-24T05:05:00.000Z');
+  assert.equal(late2.observed_local, '00:05');
+  assert.equal(late2.drift_minutes, 7, 'a run seven minutes late is +7, not -1433');
+
+  for (const bad of ['manual', '', null, undefined, '2026-08-23T04:17:00', 'nightly']) {
+    assert.equal(observationWindow(bad, '2026-08-23T09:17:00.000Z').slot, 'unrecorded', `bad slot: ${bad}`);
+  }
 }
 
 // A different domain list is not a delta about the web.
