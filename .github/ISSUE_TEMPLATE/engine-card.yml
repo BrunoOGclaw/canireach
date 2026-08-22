@@ -24,4 +24,3 @@ body:
       description: Access, privacy, identity, cost, and rollout constraints.
     validations:
       required: true
-

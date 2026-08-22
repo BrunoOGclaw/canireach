@@ -50,4 +50,3 @@ the list is a sampling frame, not a claim about exact global popularity.
 - A 200 response can be a soft 404. Agent-affordance files apply a conservative
   HTML-shell check, but cannot prove semantic validity.
 - Vendor-token simulations are not vendor-authenticated traffic.
-

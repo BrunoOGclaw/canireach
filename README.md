@@ -29,4 +29,3 @@ See [METHODOLOGY.md](METHODOLOGY.md) for the measurement and safety contract.
 
 Early baseline instrument. Crowd reports, the MCP tool, and the public map come
 after the owned probe data is flowing.
-
