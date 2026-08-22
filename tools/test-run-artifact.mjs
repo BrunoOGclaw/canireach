@@ -1,0 +1,136 @@
+// Fault-oriented tests for the publication gate.
+
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createArtifacts, validateRun, verifyArtifacts } from './finalize-run.mjs';
+
+const RUN = '2026-08-22-slot0417-gh1a1';
+const VANTAGE = 'github-actions-ubuntu-dynamic';
+const DIALECTS = ['browser', 'curl', 'canireach', 'gptbot', 'claudebot'];
+const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_auth'];
+
+function fixtureRows() {
+  const base = {
+    schema_version: 2,
+    ts: '2026-08-22T09:17:00.000Z',
+    run: RUN,
+    vantage: VANTAGE,
+    rank: 1,
+    domain: 'example.com',
+  };
+  return [
+    ...DIALECTS.map((dialect) => ({
+      ...base,
+      kind: 'request',
+      dialect,
+      robots: { allowed: true, known: true },
+      requested: true,
+      outcome: 'reachable',
+      status: 200,
+    })),
+    ...FILES.map((file) => ({ ...base, kind: 'file', file, status: 404, present: false })),
+  ];
+}
+
+function makeCase(transform = (rows) => rows, raw = null) {
+  const dir = mkdtempSync(join(tmpdir(), 'cir-artifact-'));
+  const list = join(dir, 'domains.csv');
+  const file = join(dir, `${RUN}.jsonl`);
+  writeFileSync(list, '1,example.com\n');
+  const rows = transform(fixtureRows());
+  writeFileSync(file, raw ?? `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+  return { dir, list, file };
+}
+
+function mustFail(label, transform, raw = null) {
+  const c = makeCase(transform, raw);
+  assert.throws(() => validateRun(c.file, { run: RUN, list: c.list, vantage: VANTAGE }), undefined, label);
+}
+
+const good = makeCase();
+const summary = validateRun(good.file, { run: RUN, list: good.list, vantage: VANTAGE });
+assert.equal(summary.rows, 10);
+assert.equal(summary.request_rows, 5);
+assert.equal(summary.file_rows, 5);
+assert.equal(summary.domains, 1);
+
+mustFail('invalid JSON', (rows) => rows, '{not json}\n');
+mustFail('mixed run IDs', (rows) => rows.map((row, i) => (i === 2 ? { ...row, run: 'other' } : row)));
+mustFail('unknown request outcome', (rows) => rows.map((row, i) => (i === 0 ? { ...row, outcome: 'mystery' } : row)));
+mustFail('missing row', (rows) => rows.slice(0, -1));
+mustFail('duplicate identity', (rows) => [...rows.slice(0, -1), { ...rows[0] }]);
+mustFail('forbidden response body', (rows) => rows.map((row, i) => (i === 0 ? { ...row, body: 'secret' } : row)));
+mustFail('generic headers map', (rows) => rows.map((row, i) => (i === 0 ? { ...row, headers: { server: 'x' } } : row)));
+mustFail('credential-shaped value', (rows) => rows.map((row, i) => (
+  i === 0 ? { ...row, server: ['ghp', '123456789012345678901234'].join('_') } : row
+)));
+mustFail('robots bypass', (rows) => rows.map((row, i) => (i === 0 ? { ...row, robots: { allowed: false }, requested: true } : row)));
+mustFail('old toll headers schema', (rows) => rows.map((row, i) => (i === 0 ? { ...row, toll: { headers: ['crawler-price'] } } : row)));
+
+const artifacts = createArtifacts(
+  good.file,
+  { run: RUN, list: good.list, vantage: VANTAGE },
+  {
+    scheduled_slot: '2026-08-22T04:17:00-05:00[America/Chicago]',
+    instrument_sha: 'a'.repeat(40),
+    repository: 'owner/repo',
+    workflow_run_id: '1',
+    workflow_run_attempt: '1',
+    workflow_url: 'https://github.com/owner/repo/actions/runs/1',
+    runner_os: 'Linux',
+    runner_arch: 'X64',
+    runner_image: 'ubuntu-24.04',
+  },
+);
+assert.equal(artifacts.manifest.capture_id, RUN);
+assert.equal(artifacts.manifest.dataset.sha256, summary.sha256);
+verifyArtifacts(good.file, { run: RUN, list: good.list, vantage: VANTAGE });
+verifyArtifacts(
+  good.file,
+  { run: RUN, list: good.list, vantage: VANTAGE },
+  { instrument_sha: 'a'.repeat(40), repository: 'owner/repo', workflow_run_id: '1', workflow_run_attempt: '1' },
+);
+assert.throws(
+  () => verifyArtifacts(
+    good.file,
+    { run: RUN, list: good.list, vantage: VANTAGE },
+    { instrument_sha: 'b'.repeat(40) },
+  ),
+  /instrument commit mismatch/,
+  'publisher must reject a manifest from a different instrument SHA',
+);
+assert.throws(
+  () => createArtifacts(good.file, { run: RUN, list: good.list, vantage: VANTAGE }, {}),
+  /sidecar already exists/,
+  'sidecars are immutable',
+);
+
+writeFileSync(join(good.dir, `${RUN}.sha256`), 'wrong\n');
+assert.throws(
+  () => verifyArtifacts(good.file, { run: RUN, list: good.list, vantage: VANTAGE }),
+  /checksum sidecar mismatch/,
+);
+
+const mismatchedName = join(good.dir, 'different.jsonl');
+writeFileSync(mismatchedName, readFileSync(good.file));
+assert.throws(
+  () => validateRun(mismatchedName, { run: RUN, list: good.list, vantage: VANTAGE }),
+  /filename does not match run identity/,
+);
+
+const partial = join(good.dir, `${RUN}.jsonl.partial`);
+writeFileSync(partial, readFileSync(good.file));
+assert.equal(
+  validateRun(partial, { run: RUN, list: good.list, vantage: VANTAGE, allowPartial: true }).rows,
+  10,
+  'a complete partial can pass immediately before atomic rename',
+);
+assert.throws(
+  () => validateRun(partial, { run: RUN, list: good.list, vantage: VANTAGE }),
+  /filename does not match run identity/,
+  'a partial is never publishable as a final artifact',
+);
+
+console.log('run artifact gate: 10-row positive control and 14 fault paths passed');

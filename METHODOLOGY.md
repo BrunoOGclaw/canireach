@@ -11,7 +11,10 @@ For each domain and dialect, v1 records:
   Auth directory signals.
 
 Responses are capped at 12 KiB in memory for fingerprinting and discarded.
-The dataset stores no response body, cookies, or general response headers.
+The dataset stores no response body, cookies, presented user-agent strings, or
+general response-header map. It does retain a narrow metadata allowlist:
+`server`, `x_robots_tag`, the presence (not value) of `cf-ray`, and toll-related
+header names. Header names are not header values and cannot carry credentials.
 
 ## Identity
 
@@ -31,8 +34,27 @@ computes the policy for the identity being presented. If the path is denied, it
 records the denial and sends no request. It does not solve CAPTCHAs, evade
 challenges, rotate identities, log in, or scrape content.
 
-Requests use modest concurrency, a per-domain delay, bounded redirects, and a
-12-second timeout. This is a status probe, not a crawler.
+Requests use modest concurrency, a per-domain delay, and a 12-second timeout. A
+redirect is recorded by status, destination host, scheme, and whether it crosses
+origins, but is never followed: the destination path has
+not received its own robots verdict, and redirects are observations rather than
+permission to make another request. This is a status probe, not a crawler.
+
+## Run identity, vantage, and publication
+
+Schema v2 binds every row to a unique capture id and a declared vantage. A run
+writes only to a new `.partial` file, refuses an existing id or final filename,
+checks the exact expected row/request cardinality, fsyncs, and atomically renames
+to JSONL. The publication gate then checks every row against the pinned input
+list, robots invariants, schema, identity, output privacy allowlist, duplicate
+identities, and credential-shaped values.
+
+Nightly runs execute from a GitHub-hosted Ubuntu runner with dynamic egress and
+say so in every row and manifest. That is a different vantage class from the
+first local capture; comparisons must retain the vantage dimension. Successful
+runs are published as immutable GitHub Releases with the raw JSONL, a manifest,
+and SHA-256 checksum. A transient Actions artifact only moves validated bytes
+between the unprivileged probe job and the narrowly write-enabled publisher job.
 
 ## Input provenance
 

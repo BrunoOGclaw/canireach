@@ -1,0 +1,231 @@
+name: nightly-baseline
+
+on:
+  schedule:
+    # 04:17 is the primary slot; 05:17 is a fallback because GitHub schedules
+    # can be delayed or dropped. The fallback exits once that local date has a
+    # published immutable release.
+    - cron: '17 4,5 * * *'
+      timezone: 'America/Chicago'
+  workflow_dispatch:
+    inputs:
+      slot_date:
+        description: Optional YYYY-MM-DD local slot to satisfy during a force verification
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: canireach-nightly-baseline
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.plan.outputs.should_run }}
+      capture_id: ${{ steps.plan.outputs.capture_id }}
+      scheduled_slot: ${{ steps.plan.outputs.scheduled_slot }}
+    steps:
+      - name: Require immutable storage and plan one capture per local date
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SLOT_DATE: ${{ inputs.slot_date }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          immutable=$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')
+          test "$immutable" = true
+
+          current_slot_date=$(node -e "console.log(new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()))")
+          should_run=true
+          if [ "$EVENT_NAME" = schedule ] || [ -n "$INPUT_SLOT_DATE" ]; then
+            slot_date=${INPUT_SLOT_DATE:-$current_slot_date}
+            case "$slot_date" in ????-??-??) ;; *) echo 'slot_date must be YYYY-MM-DD' >&2; exit 2 ;; esac
+            prefix="baseline-${slot_date}-slot0417-America_Chicago-"
+            releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName)
+            if RELEASES="$releases" PREFIX="$prefix" node -e "const a=JSON.parse(process.env.RELEASES);process.exit(a.some(x=>x.tagName.startsWith(process.env.PREFIX))?0:1)"; then
+              should_run=false
+            fi
+            trigger=${EVENT_NAME//_/-}
+            capture_id="${slot_date}-slot0417-America_Chicago-${trigger}-gh${RUN_ID}a${RUN_ATTEMPT}"
+            scheduled_slot="${slot_date}T04:17:00[America/Chicago]"
+          else
+            now=$(date -u +'%Y-%m-%dT%H%M%SZ')
+            capture_id="${now}-manual-gh${RUN_ID}a${RUN_ATTEMPT}"
+            scheduled_slot=manual
+          fi
+
+          {
+            echo "should_run=$should_run"
+            echo "capture_id=$capture_id"
+            echo "scheduled_slot=$scheduled_slot"
+          } >> "$GITHUB_OUTPUT"
+
+  capture:
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      CAPTURE_ID: ${{ needs.preflight.outputs.capture_id }}
+      SCHEDULED_SLOT: ${{ needs.preflight.outputs.scheduled_slot }}
+      VANTAGE_ID: github-actions-ubuntu-dynamic
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Prove the instrument gates before network work
+        run: |
+          set -euo pipefail
+          node tools/test-robots.mjs
+          node tools/mutate-robots.mjs
+          node tools/test-probe.mjs
+          node tools/test-run-artifact.mjs
+      - name: Capture the top 1,000
+        run: |
+          set -euo pipefail
+          node tools/probe.mjs \
+            --limit 1000 \
+            --concurrency 12 \
+            --run "$CAPTURE_ID" \
+            --vantage "$VANTAGE_ID" \
+            --out "data/probes/${CAPTURE_ID}.jsonl"
+      - name: Validate and bind release metadata
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node tools/finalize-run.mjs \
+            --file "data/probes/${CAPTURE_ID}.jsonl" \
+            --run "$CAPTURE_ID" \
+            --vantage "$VANTAGE_ID" \
+            --list data/domains/tranco-74V8X-1000.csv \
+            --scheduled-slot "$SCHEDULED_SLOT" \
+            --instrument-sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-url "$WORKFLOW_URL" \
+            --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" \
+            --runner-image "${ImageOS:-unknown}-${ImageVersion:-unknown}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capture-${{ needs.preflight.outputs.capture_id }}
+          path: |
+            data/probes/${{ needs.preflight.outputs.capture_id }}.jsonl
+            data/probes/${{ needs.preflight.outputs.capture_id }}.manifest.json
+            data/probes/${{ needs.preflight.outputs.capture_id }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+
+  publish:
+    needs: [preflight, capture]
+    if: needs.preflight.outputs.should_run == 'true' && needs.capture.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CAPTURE_ID: ${{ needs.preflight.outputs.capture_id }}
+      SCHEDULED_SLOT: ${{ needs.preflight.outputs.scheduled_slot }}
+      VANTAGE_ID: github-actions-ubuntu-dynamic
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: capture-${{ needs.preflight.outputs.capture_id }}
+          path: data/probes
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Revalidate the handoff bytes
+        run: |
+          set -euo pipefail
+          node tools/finalize-run.mjs \
+            --verify-only \
+            --file "data/probes/${CAPTURE_ID}.jsonl" \
+            --run "$CAPTURE_ID" \
+            --vantage "$VANTAGE_ID" \
+            --list data/domains/tranco-74V8X-1000.csv \
+            --scheduled-slot "$SCHEDULED_SLOT" \
+            --instrument-sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Publish and attest the immutable release
+        run: |
+          set -euo pipefail
+          tag="baseline-${CAPTURE_ID}"
+          gh release create "$tag" \
+            "data/probes/${CAPTURE_ID}.jsonl" \
+            "data/probes/${CAPTURE_ID}.manifest.json" \
+            "data/probes/${CAPTURE_ID}.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Baseline ${CAPTURE_ID}" \
+            --notes "Automated top-1,000 behavioral capture. The attached manifest binds the raw JSONL to its input list, exact instrument commit, workflow execution, dynamic GitHub-hosted vantage, row counts, privacy gate, and SHA-256." \
+            --latest=false
+
+          test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '[.isDraft,.isImmutable] | @tsv')" = $'false\ttrue'
+          verified=false
+          for _ in 1 2 3; do
+            if gh release verify "$tag" --repo "$GITHUB_REPOSITORY" && \
+              gh release verify-asset "$tag" "data/probes/${CAPTURE_ID}.jsonl" --repo "$GITHUB_REPOSITORY"; then
+              verified=true
+              break
+            fi
+            sleep 10
+          done
+          test "$verified" = true
+
+          verify_dir=$(mktemp -d /tmp/canireach-release-verify.XXXXXX)
+          case "$verify_dir" in /tmp/canireach-release-verify.*) ;; *) exit 2 ;; esac
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$verify_dir"
+          (cd "$verify_dir" && sha256sum -c "${CAPTURE_ID}.sha256")
+
+  failure-alert:
+    needs: [preflight, capture, publish]
+    if: >-
+      always() &&
+      (needs.preflight.result == 'failure' ||
+       (needs.preflight.result == 'success' &&
+        needs.preflight.outputs.should_run == 'true' &&
+        (needs.capture.result != 'success' || needs.publish.result != 'success')))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Comment once on the operations card
+        env:
+          MARKER: <!-- canireach-nightly-failure:${{ github.run_id }}:${{ github.run_attempt }} -->
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CAPTURE_RESULT: ${{ needs.capture.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          comments=$(gh api "repos/${GITHUB_REPOSITORY}/issues/1/comments" --paginate --slurp)
+          if COMMENTS="$comments" node -e "const a=JSON.parse(process.env.COMMENTS).flat();process.exit(a.some(x=>x.body.includes(process.env.MARKER))?0:1)"; then
+            exit 0
+          fi
+          gh issue comment 1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$MARKER Nightly baseline failed. capture=$CAPTURE_RESULT publish=$PUBLISH_RESULT run=$RUN_URL"
