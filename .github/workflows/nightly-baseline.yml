@@ -84,13 +84,17 @@ jobs:
         with:
           node-version: 22
       - name: Prove the instrument gates before network work
+        # Every tools/test-*.mjs, discovered rather than listed: a hand-listed
+        # gate only verifies what its author remembered, and test-aggregate.mjs
+        # was already missing from this step. test-workflow.mjs asserts that this
+        # loop is what runs here, so the discovery cannot be quietly narrowed.
         run: |
           set -euo pipefail
-          node tools/test-robots.mjs
           node tools/mutate-robots.mjs
-          node tools/test-probe.mjs
-          node tools/test-run-artifact.mjs
-          node tools/test-workflow.mjs
+          for t in tools/test-*.mjs; do
+            echo "--- $t"
+            node "$t"
+          done
       - name: Capture the top 1,000
         run: |
           set -euo pipefail

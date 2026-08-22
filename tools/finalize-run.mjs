@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { aggregateFile } from './aggregate.mjs';
+import { INSTRUMENT_POLICY } from './policy.mjs';
 
 const DIALECTS = ['browser', 'curl', 'canireach', 'gptbot', 'claudebot'];
 const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_auth'];
@@ -258,7 +260,7 @@ export function createArtifacts(file, options, provenance) {
   const paths = sidecars(file, options.run);
   if (existsSync(paths.manifest) || existsSync(paths.checksum)) fail('release sidecar already exists');
   const manifest = {
-    schema_version: 2,
+    schema_version: 3,
     capture_id: options.run,
     scheduled_slot: provenance.scheduled_slot,
     observed_from: summary.observed_from,
@@ -277,6 +279,11 @@ export function createArtifacts(file, options, provenance) {
       runner_arch: provenance.runner_arch,
       runner_image: provenance.runner_image,
     },
+    // Half of the comparability contract. The other half is the vantage above:
+    // a capture may only be differenced against another capture that agrees on
+    // both, and tools/compare.mjs enforces that rather than trusting a reader
+    // to remember it. See tools/policy.mjs for why this is a gate and not a note.
+    instrument_policy: INSTRUMENT_POLICY,
     input: {
       name: options.list,
       sha256: summary.input_sha256,
@@ -302,6 +309,10 @@ export function createArtifacts(file, options, provenance) {
       selected_header_metadata: ['server', 'x_robots_tag', 'content_type', 'cf_ray boolean', 'toll.header_names allowlist'],
     },
     identity_note: 'GPTBot and ClaudeBot rows are disclosed simulations, not authenticated vendor traffic.',
+    // Derived, never carried forward, and recomputed from the published bytes on
+    // the verify pass: a manifest number that cannot be regenerated from the
+    // dataset it describes is a hand-maintained summary waiting to drift.
+    aggregates: aggregateFile(file),
   };
   writeFileSync(paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
   writeFileSync(paths.checksum, `${summary.sha256}  ${basename(file)}\n`, { flag: 'wx' });
@@ -324,6 +335,16 @@ export function verifyArtifacts(file, options, expected = {}) {
   if (expected.workflow_run_attempt && manifest.workflow?.run_attempt !== expected.workflow_run_attempt) fail('manifest workflow attempt mismatch');
   if (expected.scheduled_slot && manifest.scheduled_slot !== expected.scheduled_slot) fail('manifest scheduled slot mismatch');
   if (checksum !== `${summary.sha256}  ${basename(file)}\n`) fail('checksum sidecar mismatch');
+  // The comparability contract and the derived numbers are re-derived here from
+  // the same bytes that are about to be published. This is the pass that would
+  // catch a manifest edited between capture and publication, and the only reason
+  // the aggregates on a release can be trusted without re-running the tool.
+  if (JSON.stringify(manifest.instrument_policy) !== JSON.stringify(INSTRUMENT_POLICY)) {
+    fail('manifest instrument policy does not match this instrument');
+  }
+  if (JSON.stringify(manifest.aggregates) !== JSON.stringify(aggregateFile(file))) {
+    fail('manifest aggregates are not reproducible from the dataset');
+  }
   return summary;
 }
 

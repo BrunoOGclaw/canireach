@@ -15,9 +15,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: node tools/test-robots.mjs
       - run: node tools/mutate-robots.mjs
-      - run: node tools/test-probe.mjs
-      - run: node tools/test-run-artifact.mjs
-      - run: node tools/test-workflow.mjs
-      - run: node tools/test-aggregate.mjs
+      # Discovered, not listed. A new tools/test-*.mjs is enforced the moment it
+      # exists; a list has to be remembered, and this one had already drifted.
+      - run: |
+          set -euo pipefail
+          for t in tools/test-*.mjs; do
+            echo "--- $t"
+            node "$t"
+          done
