@@ -6,12 +6,14 @@
 // useless as one that never closes, and a green suite proves neither on its own.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { compareManifests, compareAggregates } from './compare.mjs';
+import { PUBLISHED, RECOMPUTED } from './capture.mjs';
 import { INSTRUMENT_POLICY } from './policy.mjs';
 
 const COMPARE = fileURLToPath(new URL('./compare.mjs', import.meta.url));
@@ -176,9 +178,187 @@ assert.throws(
 
   const missing = run('--before', same, '--after', noAggregates);
   assert.equal(missing.status, 2);
-  assert.match(missing.stderr, /no aggregates/);
+  assert.match(missing.stderr, /names no dataset\.name/);
 
   assert.equal(run('--before', same).status, 2, 'missing arguments must be a usage error');
 }
 
-console.log('cross-capture gate: delta arithmetic, withholding, acknowledgement and exit codes passed');
+// --- the immutable v1 baseline must be able to ENTER the comparison ----------
+//
+// The pre-September-15 baseline is schema v1 published as an immutable release:
+// no `aggregates` block, no vantage, no instrument policy, and no possibility of
+// regenerating it in place. Before this, compare.mjs refused it structurally, so
+// the one capture the entire before/after claim depends on could not be a
+// `--before` side at all — and a structural refusal is indistinguishable, from
+// the exit code alone, from the comparability gate doing its job.
+//
+// data/probes/ is gitignored, so these fixtures are built here rather than read
+// from disk: a test that only runs on the author's laptop enforces nothing.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'canireach-v1-'));
+
+  // Rows in the v1 shape, hand-counted below. Two domains, one dialect that was
+  // allowed and one that robots denied, so `requests_sent` and the outcome
+  // counts are not the same number.
+  const rows = [];
+  for (const domain of ['a.example', 'b.example']) {
+    rows.push({
+      schema_version: 1,
+      kind: 'request',
+      domain,
+      dialect: 'browser',
+      requested: true,
+      outcome: 'reachable',
+      robots: { allowed: true },
+    });
+    rows.push({
+      schema_version: 1,
+      kind: 'request',
+      domain,
+      dialect: 'gptbot',
+      requested: false,
+      outcome: 'denied_by_robots',
+      robots: { allowed: false, reason: 'disallow' },
+    });
+    rows.push({ schema_version: 1, kind: 'file', domain, file: 'robots', status: 200, present: true });
+    rows.push({ schema_version: 1, kind: 'file', domain, file: 'llms_txt', status: 200, present: domain === 'a.example' });
+  }
+  const bytes = Buffer.from(rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+  const writeV1 = (name, over = {}, body = bytes) => {
+    const capture = join(dir, `${name}.jsonl`);
+    writeFileSync(capture, body);
+    const manifestPath = join(dir, `${name}.manifest.json`);
+    writeFileSync(
+      manifestPath,
+      JSON.stringify(
+        {
+          schema_version: 1,
+          capture_id: '2026-08-22T0815Z',
+          capture_class: 'pre-2026-09-15-baseline',
+          input: { name: 'data/domains/tranco-74V8X-1000.csv', sha256: 'f'.repeat(64) },
+          dataset: {
+            name: `${name}.jsonl`,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+            rows: rows.length,
+          },
+          request_outcomes: { reachable: 2, denied_by_robots: 2 },
+          ...over,
+        },
+        null,
+        2,
+      ),
+    );
+    return manifestPath;
+  };
+
+  const modern = join(dir, 'after.manifest.json');
+  writeFileSync(modern, JSON.stringify(manifest({ input: { name: 'x', sha256: 'f'.repeat(64) } }), null, 2));
+
+  const run = (...args) => spawnSync(process.execPath, [COMPARE, ...args], { encoding: 'utf8' });
+
+  // The headline case: the real pairing, withheld for the SUBSTANTIVE reason.
+  {
+    const v1 = writeV1('baseline');
+    const r = run('--before', v1, '--after', modern);
+    assert.equal(r.status, 3, 'the v1 side must load and then be withheld, not fail to load');
+    const out = JSON.parse(r.stdout);
+
+    // Proof the withhold is the gate and not a load failure: the v1 side is
+    // present, its aggregates were recomputed, and they are real numbers.
+    assert.equal(out.before.aggregates_source, RECOMPUTED);
+    assert.equal(out.after.aggregates_source, PUBLISHED);
+    assert.equal(out.before.capture_id, '2026-08-22T0815Z');
+    assert.equal(out.delta, null);
+
+    // And the reason is the discontinuity this project actually has.
+    assert.ok(out.blocking_dimensions.includes('vantage.class'));
+    assert.ok(out.blocking_dimensions.includes('instrument_policy.robots_unavailable'));
+    assert.match(out.withheld_reason, /vantage\.class/);
+    // Unrecorded on the v1 side, recorded on the automated side. Not "equal
+    // because both are blank" — that rule is what stops the silent difference.
+    assert.equal(out.dimensions['vantage.class'].before, 'unrecorded');
+    assert.equal(out.dimensions['vantage.class'].after, 'github-hosted-dynamic-egress');
+    assert.equal(out.dimensions['input.sha256'].equal, true, 'same domain list on both sides');
+
+    // Acknowledging every blocking dimension releases a delta computed from the
+    // recomputed side. Hand-counted from the fixture rows: 4 request rows, 2
+    // sent, 2 reachable -> rate 1.0 over sent. Without this the test would prove
+    // only that the tool can refuse, never that the recomputed numbers are right.
+    const acked = run(
+      '--before',
+      v1,
+      '--after',
+      modern,
+      ...out.blocking_dimensions.flatMap((d) => ['--acknowledge', d]),
+    );
+    assert.equal(acked.status, 0);
+    const ok = JSON.parse(acked.stdout);
+    assert.equal(ok.before.aggregates_source, RECOMPUTED);
+    assert.equal(ok.delta.requests_sent.before, 2);
+    assert.equal(ok.delta.outcomes.reachable.before, 2);
+    assert.equal(ok.delta.outcomes.denied_by_robots.before, 2);
+    assert.equal(ok.delta.reachable_rate_of_sent.before, 1);
+    assert.equal(ok.delta.affordances.llms_txt.before, 1);
+    assert.equal(ok.strictly_comparable, false, 'an acknowledged confounder is still a confounder');
+  }
+
+  // Recomputation is refused when the bytes are not the published bytes. The
+  // hash is the only thing that makes recomputing an immutable release safe.
+  {
+    const tampered = writeV1('tampered', {}, Buffer.concat([bytes, Buffer.from('{"kind":"request"}\n')]));
+    const r = run('--before', tampered, '--after', modern);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /do not match the published manifest/);
+  }
+
+  // ...and when the aggregator no longer reproduces the counts published beside
+  // those bytes. The hash proves the bytes; this proves the reading of them.
+  {
+    const drifted = writeV1('drifted', { request_outcomes: { reachable: 99, denied_by_robots: 2 } });
+    const r = run('--before', drifted, '--after', modern);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /disagree with the outcome counts published/);
+    assert.match(r.stderr, /reachable: published 99, recomputed 2/);
+  }
+
+  // A hash that matches while the row count does not means the manifest and the
+  // bytes disagree about what the capture IS, and an aggregate over the wrong
+  // number of rows is a wrong number. Found uncovered by fault injection: this
+  // guard existed in loadVerifiedCapture and no test in the repo exercised it,
+  // so it was assurance nobody was holding.
+  {
+    const miscounted = writeV1('miscounted', {
+      dataset: { name: 'miscounted.jsonl', sha256: createHash('sha256').update(bytes).digest('hex'), rows: 999 },
+    });
+    const r = run('--before', miscounted, '--after', modern);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /declares 999 rows; file holds 8/);
+  }
+
+  // Bytes absent entirely: an actionable error naming the flag for THIS side.
+  {
+    const orphan = join(dir, 'orphan.manifest.json');
+    writeFileSync(
+      orphan,
+      JSON.stringify({ capture_id: 'x', dataset: { name: 'nowhere.jsonl', sha256: '0'.repeat(64), rows: 1 } }, null, 2),
+    );
+    const r = run('--before', orphan, '--after', modern);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /--before-capture/);
+    assert.doesNotMatch(r.stderr, /--after-capture/, 'the error must name the side that actually failed');
+  }
+
+  // A manifest may not steer the reader outside its own directory: only the
+  // basename of dataset.name is used, so an absolute path in published data
+  // cannot make the tool read some other file that happens to hash correctly.
+  {
+    const escaping = writeV1('escaping', { dataset: { name: '/etc/passwd', sha256: '0'.repeat(64), rows: 1 } });
+    const r = run('--before', escaping, '--after', modern);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /passwd/);
+    assert.doesNotMatch(r.stderr, /\/etc\/passwd/, 'dataset.name must be reduced to its basename');
+  }
+}
+
+console.log('cross-capture gate: delta arithmetic, withholding, acknowledgement, v1 admission and exit codes passed');
