@@ -11,8 +11,9 @@
 // Usage: node tools/build-site.mjs [--capture FILE] [--manifest FILE] [--out DIR]
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { aggregate } from './aggregate.mjs';
+import { sidecars } from './finalize-run.mjs';
 import { loadVerifiedCapture } from './capture.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
 import { COMPARABILITY_DIMENSIONS, INSTRUMENT_POLICY } from './policy.mjs';
@@ -474,6 +475,76 @@ function methodBody(s) {
 }
 
 /**
+ * The command this surface tells a reader to run, DERIVED from the capture it
+ * was handed rather than typed.
+ *
+ * The text that shipped here was `--manifest <capture>.final.manifest.json`.
+ * That is the real asset name of exactly one release — the hand-corrected v1
+ * baseline this surface is pinned to — and it is wrong for every capture the
+ * instrument writes, which `sidecars()` names `<capture-id>.manifest.json`. So
+ * the note beside it said "download ANY capture" while the command worked for
+ * one, and from the first scheduled night a new counterexample publishes every
+ * night. Same shape as the currency claims on #24: prose asserting a property
+ * of ONE capture inside a builder that accepts ANY capture — except a wrong
+ * command is not mis-cited, it is run, and it fails with ENOENT.
+ *
+ * Two derivations, no restatements. The served name is the basename of the
+ * manifest `buildSite` verified bytes against, so it is by construction the file
+ * that starts a server for the numbers on this page. The general convention
+ * comes from the WRITER that produces it: change how `finalize-run.mjs` names a
+ * sidecar and this sentence changes with it.
+ */
+const MANIFEST_FLAG = '--manifest';
+
+export function invocationFor(manifestPath, source) {
+  const served = basename(String(manifestPath));
+  const naming = basename(sidecars('probes/capture.jsonl', '<capture-id>').manifest);
+  return assertRunnableInvocation(
+    {
+      command: 'node',
+      args: ['tools/mcp-server.mjs', MANIFEST_FLAG, served],
+      manifest_naming: naming,
+      source: source.repository,
+      captures: source.releases,
+      note:
+        `Clone the repository and download the release carrying \`${served}\` — that asset name identifies exactly one ` +
+        'release, which matters because a capture whose metadata was corrected has more than one and only the last is ' +
+        `the one these figures came from. Any other capture works the same way: the instrument names every manifest it ` +
+        `writes \`${naming}\`, so pass whichever one you downloaded. The server reads local bytes, verifies them ` +
+        'against the SHA-256 its manifest publishes, and refuses to start if they disagree. It opens no socket.',
+    },
+    served,
+  );
+}
+
+/**
+ * Refuse to publish a command that would not run. Structural, not merely
+ * tested: the defect this exists for was a string literal that read perfectly
+ * and ENOENTed, and the suite's own check — titled "the invocation the site
+ * publishes is the one the server accepts" — asserted the flag was present and
+ * never looked at the filename beside it.
+ */
+export function assertRunnableInvocation(invocation, expectedManifest) {
+  const refuse = (msg) => {
+    const err = new Error(`published invocation would not run: ${msg}`);
+    err.exitCode = 3;
+    throw err;
+  };
+  const { args } = invocation;
+  if (!Array.isArray(args)) refuse('args is not a list');
+  // A placeholder is the failure mode itself: unexpanded angle brackets are how
+  // a filename nobody ever resolved reaches a reader as a command.
+  const placeholder = args.find((a) => /[<>]/.test(String(a)));
+  if (placeholder) refuse(`\`${placeholder}\` is a placeholder, not a path a reader can run`);
+  const at = args.indexOf(MANIFEST_FLAG);
+  if (at < 0) refuse(`args omit ${MANIFEST_FLAG}, which the server requires`);
+  if (args[at + 1] !== expectedManifest) {
+    refuse(`names \`${args[at + 1]}\`, but this surface was built from \`${expectedManifest}\``);
+  }
+  return invocation;
+}
+
+/**
  * The machine descriptor for the MCP server.
  *
  * An agent should be able to decide whether to wire this server up without
@@ -482,7 +553,7 @@ function methodBody(s) {
  * is derived too: it tells a calling model, up front, the field names it will
  * never be given, which is more useful to it than the prose explaining why.
  */
-function mcpDescriptor(s, coverage) {
+function mcpDescriptor(s, coverage, invocation) {
   return {
     server: {
       name: SERVER_NAME,
@@ -490,13 +561,7 @@ function mcpDescriptor(s, coverage) {
       protocol_version: PROTOCOL_VERSION,
       transport: 'stdio — JSON-RPC 2.0, newline-delimited',
     },
-    invocation: {
-      command: 'node',
-      args: ['tools/mcp-server.mjs', '--manifest', '<capture>.final.manifest.json'],
-      source: s.source.repository,
-      captures: s.source.releases,
-      note: 'Clone the repository and download any capture from the releases page. The server reads local bytes, verifies them against the SHA-256 its manifest publishes, and refuses to start if they disagree. It opens no socket.',
-    },
+    invocation,
     tools: TOOLS,
     dataset: {
       capture_id: s.capture_id,
@@ -538,7 +603,7 @@ function mcpDescriptor(s, coverage) {
 // an HTML comment because an HTML comment SHIPS: a public page is not the place
 // to explain a bug to its reader, and the built artifact is checked for policy
 // names it did not measure.
-function mcpBody(s, coverage) {
+function mcpBody(s, coverage, invocation) {
   const specs = toolSpecs();
   const tools = specs
     .map(
@@ -561,9 +626,9 @@ function mcpBody(s, coverage) {
 
 <h2>Run it</h2>
 <pre><code>git clone ${esc(s.source.repository)}
-# download any capture from ${esc(s.source.releases)}
-node tools/mcp-server.mjs --manifest &lt;capture&gt;.final.manifest.json</code></pre>
-<p>No dependencies and no <code>package.json</code>; the protocol is a few message shapes. The full descriptor, including every tool's input schema, is at <a href="/api/mcp.json">/api/mcp.json</a> — readable without completing a handshake.</p>
+# from ${esc(s.source.releases)}, the release carrying ${esc(invocation.args[invocation.args.length - 1])}
+${esc(invocation.command)} ${invocation.args.map((a) => esc(a)).join(' ')}</code></pre>
+<p>That is the manifest asset of the capture <em>this page</em> renders, so the command reproduces the figures below. Any other capture works the same way: the instrument names every manifest it writes <code>${esc(invocation.manifest_naming)}</code>, so pass whichever one you downloaded. No dependencies and no <code>package.json</code>; the protocol is a few message shapes. The full descriptor, including every tool's input schema, is at <a href="/api/mcp.json">/api/mcp.json</a> — readable without completing a handshake.</p>
 
 <h2>Tools</h2>
 ${tools}
@@ -724,6 +789,9 @@ export function buildSite({ capture, manifest, out }) {
   // derivations of one fact are two things that can disagree.
   const profile = comparabilityProfile(m);
   const summary = summarise(agg, m, sha256, profile);
+  // Derived from the very path whose bytes were just verified, so the published
+  // command and the published numbers cannot come from different captures.
+  const invocation = invocationFor(manifest, summary.source);
 
   // Coverage is computed by the SAME function the MCP tool serves, over the same
   // rows, so the page cannot claim a split the tool would not report. `as_of` is
@@ -754,7 +822,7 @@ export function buildSite({ capture, manifest, out }) {
     page(
       PAGES[2].title,
       'The read-only MCP tool an agent calls to ask what was last measured at a domain.',
-      mcpBody(summary, coverage),
+      mcpBody(summary, coverage, invocation),
       `${SITE_ORIGIN}/mcp`,
     ),
   );
@@ -773,7 +841,7 @@ export function buildSite({ capture, manifest, out }) {
   const json = new Map([
     ['api/summary.json', summary],
     ['api/baseline.json', { capture_id: m.capture_id, dataset_sha256: sha256, manifest: m, aggregate: agg }],
-    ['api/mcp.json', mcpDescriptor(summary, coverage)],
+    ['api/mcp.json', mcpDescriptor(summary, coverage, invocation)],
   ]);
   for (const [rel, value] of json) {
     assertNoVolatileClaim(value, rel);
