@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { aggregateFile } from './aggregate.mjs';
-import { INSTRUMENT_POLICY, observationWindow } from './policy.mjs';
+import { INSTRUMENT_POLICY, ROW_SCHEMA_VERSION, observationWindow } from './policy.mjs';
 
 const DIALECTS = ['browser', 'curl', 'canireach', 'gptbot', 'claudebot'];
 const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_auth'];
@@ -48,7 +48,12 @@ const FILE_ROW_KEYS = new Set([
   'redirected',
   'redirect_target_host',
   'redirect_target_scheme',
+  'redirect_hops',
+  'redirect_chain',
+  'redirect_refusal',
+  'final_host',
 ]);
+const REDIRECT_HOP_KEYS = new Set(['status', 'target_host', 'target_scheme', 'cross_authority']);
 const ROBOTS_KEYS = new Set(['allowed', 'reason', 'rule', 'group', 'explicit', 'known']);
 const TOLL_KEYS = new Set(['status_402', 'header_names']);
 const OUTCOMES = new Set([
@@ -169,7 +174,10 @@ export function validateRun(file, { run, list, vantage, allowPartial = false, li
     } catch {
       fail(`invalid JSON at line ${index + 1}`);
     }
-    if (row.schema_version !== 2) fail(`line ${index + 1} has schema ${row.schema_version}`);
+    // Exact, and read from tools/policy.mjs rather than typed here. A capture is
+    // only publishable under the schema this instrument declares in its own
+    // manifest; a mixed-schema file would be two instruments in one dataset.
+    if (row.schema_version !== ROW_SCHEMA_VERSION) fail(`line ${index + 1} has schema ${row.schema_version}`);
     if (row.run !== run) fail(`mixed run identity at line ${index + 1}`);
     if (row.vantage !== vantage) fail(`mixed vantage identity at line ${index + 1}`);
     const expectedDomain = inputRows.get(row.rank);
@@ -207,6 +215,22 @@ export function validateRun(file, { run, list, vantage, allowPartial = false, li
     } else if (row.kind === 'file') {
       assertKeys(row, FILE_ROW_KEYS, 'file row', index + 1);
       if (!FILES.includes(row.file)) fail(`unknown file observation at line ${index + 1}`);
+      if (row.redirect_chain !== undefined) {
+        if (!Array.isArray(row.redirect_chain)) fail(`invalid redirect chain at line ${index + 1}`);
+        // The chain is the audit trail for a followed policy document, so its
+        // length has to agree with the count published beside it — two fields
+        // describing one thing are a place for a discrepancy to hide.
+        if (row.redirect_hops !== row.redirect_chain.length) {
+          fail(`redirect hop count disagrees with the chain at line ${index + 1}`);
+        }
+        if (row.redirect_chain.length > 6) fail(`redirect chain exceeds the follow budget at line ${index + 1}`);
+        for (const hop of row.redirect_chain) {
+          assertKeys(hop, REDIRECT_HOP_KEYS, 'redirect hop', index + 1);
+          if (!Number.isInteger(hop.status) || hop.status < 300 || hop.status > 399) {
+            fail(`non-redirect status in redirect chain at line ${index + 1}`);
+          }
+        }
+      }
       identity = `file:${row.file}`;
       fileRows++;
       files[row.file] = (files[row.file] || 0) + 1;

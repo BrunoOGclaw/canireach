@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertExtracted, extractRunScript } from './workflow-step.mjs';
+import { COMPARABILITY_DIMENSIONS, INSTRUMENT_POLICY, UNRECORDED, dimensionValue } from './policy.mjs';
 
 const STEP_NAME = 'Compare against the previous capture in this slot';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -51,16 +52,22 @@ function manifest(captureId, { slot = SLOT, reachable = 2400, policy = {} } = {}
     observation_window: { slot, nominal: null, observed_local: '04:19', drift_minutes: 2 },
     vantage: { class: 'github-actions-dynamic' },
     input: { sha256: 'b'.repeat(64) },
-    instrument_policy: {
-      row_schema_version: 2,
-      robots_unavailable: 'fail-closed-except-404-410',
-      redirects: 'not-followed',
-      denial_gate: 'no-request-past-a-denial',
-      dialects: ['browser', 'canireach', 'claudebot', 'curl', 'gptbot'],
-      ...policy,
-    },
+    // Derived from the real profile so that adding a comparability dimension
+    // cannot quietly turn every fixture pair into a withhold — see the same
+    // note in tools/test-series.mjs.
+    instrument_policy: { ...INSTRUMENT_POLICY, ...policy },
     aggregates: { domains: 1000, requests_sent: 5000, outcomes: { reachable }, challenges: {}, toll: {}, affordances: {} },
   };
+}
+
+// A fixture missing a declared dimension can only produce `withheld`, so every
+// case expecting a delta would fail for a reason unrelated to what it tests.
+for (const path of COMPARABILITY_DIMENSIONS) {
+  assert.notEqual(
+    dimensionValue(manifest('probe'), path),
+    UNRECORDED,
+    `the series-step fixture does not record ${path}, so every pair built from it is withheld by construction`,
+  );
 }
 
 /**

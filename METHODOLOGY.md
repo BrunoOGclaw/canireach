@@ -35,11 +35,32 @@ computes the policy for the identity being presented. If the path is denied, it
 records the denial and sends no request. It does not solve CAPTCHAs, evade
 challenges, rotate identities, log in, or scrape content.
 
-Requests use modest concurrency, a per-domain delay, and a 12-second timeout. A
-redirect is recorded by status, destination host, scheme, and whether it crosses
-origins, but is never followed: the destination path has
-not received its own robots verdict, and redirects are observations rather than
-permission to make another request. This is a status probe, not a crawler.
+Requests use modest concurrency, a per-domain delay, and a 12-second timeout.
+
+**The probe target and `robots.txt` get different redirect policies, and the
+difference is deliberate.** For the probe target, a redirect is recorded by
+status, destination host, scheme, and whether it crosses origins, and is never
+followed: the destination path has not received its own robots verdict, and a
+redirect is an observation rather than permission to make another request. This
+is a status probe, not a crawler.
+
+`robots.txt` is not a destination — it is the policy document, and RFC 9309
+§2.3.1.2 addresses its redirects directly: crawlers SHOULD follow at least five
+consecutive redirects, even across authorities, and a policy reached within five
+MUST be applied in the context of the initial authority. From schema v3 the
+probe does exactly that. The full chain is published on the `robots` row
+(`redirect_hops`, `redirect_chain`, `final_host`), so which authority actually
+answered is auditable from the bytes. Following the policy document is not
+following the site: every measured request still goes to the domain on the input
+list, under the rules fetched on its behalf.
+
+More than five consecutive redirects, a missing or unparseable `Location`, a
+non-HTTP scheme, a loop, or a redirect to a literal loopback/link-local/private
+address leaves policy unknown and fails closed exactly like an unreadable
+`robots.txt`. The private-address refusal is a guard against a hosted runner
+being pointed at its own metadata service by a third party's `Location` header;
+it matches address literals only and makes no claim about hostnames that
+*resolve* into private space.
 
 ## Run identity, vantage, and publication
 
@@ -257,20 +278,27 @@ the list is a sampling frame, not a claim about exact global popularity.
 ## Known limits
 
 - One probe location cannot separate IP reputation or geography from identity.
-- An explicit 404/410 means no `robots.txt` policy and permits the status probe.
-  Redirects, auth/challenge responses, rate limits, server failures, and network
-  errors leave policy unknown; schema v2 fails closed and sends no later request.
+- An explicit 404/410 means no `robots.txt` policy and permits the status probe,
+  read from the response the policy was finally fetched from. Auth/challenge
+  responses, rate limits, server failures, network errors, and redirects that
+  do not resolve to a policy document within five hops leave policy unknown;
+  the instrument fails closed and sends no later request.
 - Challenge detection is fingerprint-based and can have false positives or
   false negatives.
 - A 200 response can be a soft 404. Agent-affordance files apply a conservative
   HTML-shell check, but cannot prove semantic validity.
 - Vendor-token simulations are not vendor-authenticated traffic.
-- **Most of a capture is not behavioural evidence.** On 2026-08-22T162332Z only
-  195 of 1,000 domains carry any. 452 domains redirect `robots.txt` and this
-  instrument records redirects without following them, so the fail-closed policy
-  stops those doors before a request is sent. RFC 9309 §2.3.1.2 states that
-  crawlers SHOULD follow at least five consecutive redirects for robots.txt,
-  even across authorities, so this is a conformance gap. The redirect policy is
-  correct for the probe target — a destination path needs its own robots verdict
-  — and wrong for robots.txt itself. Changing it moves a declared comparability
-  dimension, so it is tracked as a card rather than patched silently.
+- **Most of a capture was not behavioural evidence, and the reason was us.** On
+  2026-08-22T162332Z only 195 of 1,000 domains carried any. 452 domains redirect
+  `robots.txt` — 374 of them to their own `www.` host — and the instrument
+  recorded those redirects without following them, so its fail-closed policy
+  stopped those doors before a request was sent. That was a conformance gap
+  against RFC 9309 §2.3.1.2, not a judgement call, and it is fixed from schema
+  v3 (see *Robots and access controls*). **Captures before and after that change
+  are not strictly comparable**: `instrument_policy.robots_redirects` is a
+  declared dimension, an older manifest reports it as `unrecorded`, and
+  `unrecorded` never equals anything — so `tools/compare.mjs` withholds across
+  the boundary. That is the gate working. The change landed before the first
+  scheduled capture, so the automated 04:17 series is uniform from its first
+  night; only the v1 baseline and the hand-run daytime captures sit on the far
+  side, and none of those could pair with the series in any case.

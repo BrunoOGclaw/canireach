@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { selectPartner, slotFromTag } from './series.mjs';
-import { UNRECORDED } from './policy.mjs';
+import { COMPARABILITY_DIMENSIONS, INSTRUMENT_POLICY, UNRECORDED, dimensionValue } from './policy.mjs';
 
 const TOOL = fileURLToPath(new URL('./series.mjs', import.meta.url));
 const root = mkdtempSync(join(tmpdir(), 'canireach-series-'));
@@ -154,18 +154,30 @@ function manifest(tag, slot, { outcomes, aggregates = true } = {}) {
     observation_window: { slot, nominal: null, observed_local: '09:19', drift_minutes: 2 },
     vantage: { class: 'github-actions-dynamic' },
     input: { sha256: 'b'.repeat(64) },
-    instrument_policy: {
-      row_schema_version: 2,
-      robots_unavailable: 'fail-closed-except-404-410',
-      redirects: 'not-followed',
-      denial_gate: 'robots-first',
-      dialects: 'browser,gptbot,claudebot,curl,canireach',
-    },
+    // Derived, not hand-listed. A fixture that spells out the policy block goes
+    // stale the moment a dimension is added — and it goes stale in the most
+    // dangerous direction: both sides report `unrecorded`, which never equals
+    // anything, so every pair is withheld and a suite whose cases all expect a
+    // delta turns red while a suite that expected withholding would have gone
+    // GREEN while testing nothing at all.
+    instrument_policy: { ...INSTRUMENT_POLICY },
   };
   if (aggregates) {
     m.aggregates = { domains: 1000, requests_sent: 5000, outcomes, challenges: {}, toll: {}, affordances: {} };
   }
   return m;
+}
+
+// A fixture that is missing a declared dimension can only ever produce
+// `withheld`, so a case expecting a delta would fail for a reason that has
+// nothing to do with what it tests. Checked once, here, rather than diagnosed
+// later from a confusing withheld_reason.
+for (const path of COMPARABILITY_DIMENSIONS) {
+  assert.notEqual(
+    dimensionValue(manifest('baseline-x', '04:17[America/Chicago]', { outcomes: {} }), path),
+    UNRECORDED,
+    `the comparison fixture does not record ${path}, so every pair built from it is withheld by construction`,
+  );
 }
 
 let files = 0;

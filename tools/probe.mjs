@@ -29,6 +29,7 @@ import { pathToFileURL } from 'node:url';
 import { DIALECTS, SITE_FILES, PROBE_CONTACT } from './dialects.mjs';
 import { isAllowed, hasExplicitGroup } from './robots.mjs';
 import { validateRun } from './finalize-run.mjs';
+import { ROW_SCHEMA_VERSION } from './policy.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => {
@@ -207,56 +208,194 @@ function classifyError(err) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// --- robots.txt retrieval ---------------------------------------------------
+//
+// THE PROBE TARGET AND robots.txt GET DIFFERENT REDIRECT POLICIES, ON PURPOSE.
+//
+// For the probe target, a redirect is an observation and never an instruction:
+// following one can cross an origin or land on a path whose own robots verdict
+// we have not asked for. That stays `recorded-never-followed`.
+//
+// robots.txt is not a destination, it is the policy document, and RFC 9309
+// §2.3.1.2 addresses its redirects explicitly:
+//
+//   "The crawlers SHOULD follow at least five consecutive redirects, even
+//    across authorities (for example, hosts in the case of HTTP). If a
+//    robots.txt file is reached within five consecutive redirects, the
+//    robots.txt file MUST be fetched, parsed, and its rules followed in the
+//    context of the initial authority. If there are more than five consecutive
+//    redirects, crawlers MAY assume that the robots.txt file is unavailable."
+//
+// Treating those redirects as unreadable policy was a CONFORMANCE GAP, and it
+// was not a small one. Measured on the 2026-08-22T162332Z capture: 452 of the
+// top 1,000 domains redirect robots.txt, 374 of them to their own `www.` host,
+// and every one of those domains contributed five `not-attempted` doors that a
+// careless reader would count as the web refusing us. Only 195 domains carried
+// any behavioural evidence at all. The refusal was ours, not theirs.
+//
+// "In the context of the initial authority" is the load-bearing clause: the
+// rules fetched from `www.example.com` govern requests to `example.com`, and we
+// still send those requests to the initial authority. Following the policy
+// document is not the same as following the site.
+
+export const ROBOTS_MAX_REDIRECTS = 5;
+
+/**
+ * Hosts we refuse to follow a redirect to, matched on literal addresses only.
+ *
+ * This instrument runs unattended on a hosted runner, and a redirect is an
+ * instruction from a third party. `Location: http://169.254.169.254/` is the
+ * textbook shape, and refusing it costs nothing real: no site's robots.txt
+ * redirects to loopback or link-local space. A hostname that RESOLVES into
+ * private space is not covered here — that is a DNS-level problem shared with
+ * every domain on the list, not something this function can honestly claim.
+ */
+export function isPrivateHostLiteral(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host.startsWith('[')) {
+    const v6 = host.slice(1, -1);
+    // loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10)
+    return v6 === '::1' || v6 === '::' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const [a, b] = v4.slice(1).map(Number);
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
+  return false;
+}
+
+/** Where does this redirect point, and may we follow it? */
+function redirectTarget(res, fromUrl) {
+  const loc = res.headers?.['location'];
+  if (!loc) return { refusal: 'redirect-no-location' };
+  let target;
+  try {
+    target = new URL(loc, fromUrl);
+  } catch {
+    return { refusal: 'redirect-unparseable-location' };
+  }
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+    return { refusal: 'redirect-unsupported-scheme' };
+  }
+  if (isPrivateHostLiteral(target.hostname)) return { refusal: 'redirect-refused-private-target' };
+  return { url: target };
+}
+
+/**
+ * Fetch robots.txt, following up to ROBOTS_MAX_REDIRECTS consecutive redirects.
+ *
+ * Returns the TERMINAL response plus the chain that led to it, so the decision
+ * is auditable from the published bytes rather than from this comment. A
+ * `refusal` means we stopped following and policy stays unknown: it fails
+ * closed exactly like an unreadable robots.txt, because that is what it is.
+ */
+export async function fetchRobots(domain, ua, { probeUrlImpl = probeUrl, sleepImpl = sleep } = {}) {
+  const start = `https://${domain}/robots.txt`;
+  let url = start;
+  const chain = [];
+  const seen = new Set([start]);
+
+  for (;;) {
+    const res = await probeUrlImpl(url, ua);
+    const done = (refusal) => ({ res, chain, hops: chain.length, final_url: url, refusal });
+    if (!res.ok || !(res.status >= 300 && res.status < 400)) return done(null);
+
+    const next = redirectTarget(res, url);
+    chain.push({
+      status: res.status,
+      target_host: next.url ? next.url.host : (res.redirect?.target_host ?? null),
+      target_scheme: next.url ? next.url.protocol.replace(/:$/, '') : (res.redirect?.target_scheme ?? null),
+      cross_authority: next.url ? next.url.host !== new URL(url).host : null,
+    });
+
+    // The hop is recorded BEFORE the budget check: a sixth redirect is an
+    // observation about the site, and a chain that stopped one short of the
+    // reason it stopped would be unauditable.
+    if (chain.length > ROBOTS_MAX_REDIRECTS) return done('redirect-exhausted');
+    if (next.refusal) return done(next.refusal);
+    if (seen.has(next.url.href)) return done('redirect-loop');
+
+    seen.add(next.url.href);
+    url = next.url.href;
+    await sleepImpl(POLITE_GAP_MS);
+  }
+}
+
 // --- per-domain -------------------------------------------------------------
 
-function unavailableRobotsVerdict(robotsRes) {
+function unavailableRobotsVerdict(robotsRes, refusal = null) {
   // RFC 9309 permits access when robots.txt is explicitly unavailable (4xx),
-  // but this unattended instrument uses the narrower 404/410 signal. Redirects,
-  // auth/challenge responses, rate limits, server failures, and network errors
-  // leave policy unknown and therefore fail closed.
+  // but this unattended instrument uses the narrower 404/410 signal. Auth and
+  // challenge responses, rate limits, server failures, network errors, and
+  // redirects we could not resolve to a policy document all leave policy
+  // unknown and therefore fail closed.
+  //
+  // The 404/410 test comes first and reads the TERMINAL response: a robots.txt
+  // that redirects to a 404 is an explicitly absent policy, not an unknown one.
   if (robotsRes.ok && (robotsRes.status === 404 || robotsRes.status === 410)) {
     return { allowed: true, reason: `robots-http-${robotsRes.status}`, rule: null, group: null };
   }
-  return {
-    allowed: false,
-    reason: robotsRes.ok ? `robots-policy-unknown-http-${robotsRes.status}` : `robots-policy-unknown-${robotsRes.error}`,
-    rule: null,
-    group: null,
-  };
+  // Every spelling here carries `policy-unknown`, which is the substring
+  // tools/aggregate.mjs counts on to separate "the site said no" from "we could
+  // not read the site's answer". A refusal that lost it would be silently
+  // recounted as a denial by the host.
+  const reason = refusal
+    ? `robots-policy-unknown-${refusal}`
+    : robotsRes.ok
+      ? `robots-policy-unknown-http-${robotsRes.status}`
+      : `robots-policy-unknown-${robotsRes.error}`;
+  return { allowed: false, reason, rule: null, group: null };
 }
 
 export async function probeDomain(rank, domain, { probeUrlImpl = probeUrl, sleepImpl = sleep } = {}) {
   const rows = [];
   const ts = new Date().toISOString();
-  const base = { schema_version: 2, ts, run: RUN, vantage: VANTAGE, rank, domain };
+  const base = { schema_version: ROW_SCHEMA_VERSION, ts, run: RUN, vantage: VANTAGE, rank, domain };
 
   // 1. robots.txt, always, with our own honest identity. robots.txt is the policy
-  //    file itself and is never gated by its own contents.
+  //    file itself and is never gated by its own contents. Redirects to it are
+  //    followed (RFC 9309 §2.3.1.2); redirects to anything else are not.
   const ourUa = DIALECTS.find((d) => d.id === 'canireach').ua;
-  const robotsRes = await probeUrlImpl(`https://${domain}/robots.txt`, ourUa);
-  const robotsOk = robotsRes.ok && robotsRes.status === 200;
+  const robots = await fetchRobots(domain, ourUa, { probeUrlImpl, sleepImpl });
+  const robotsRes = robots.res;
+  const robotsOk = !robots.refusal && robotsRes.ok && robotsRes.status === 200;
   const robotsText = robotsOk ? robotsRes.body : '';
+  const lastHop = robots.chain[robots.chain.length - 1] ?? null;
 
   rows.push({
     ...base,
     kind: 'file',
     file: 'robots',
+    // The status of the response the policy was READ FROM, which is the whole
+    // point of following: after a 301 to www, `200` is the honest answer and
+    // `301` was an answer about the redirect, not about the policy.
     status: robotsRes.ok ? robotsRes.status : null,
     error: robotsRes.ok ? null : robotsRes.error,
     bytes: robotsRes.bytes_read ?? 0,
     // A robots.txt that is itself behind a challenge is a finding in its own right.
     challenge: robotsRes.ok ? detectChallenge(robotsRes.headers, robotsRes.body) : null,
     truncated: (robotsRes.bytes_read ?? 0) >= MAX_BODY,
-    redirected: robotsRes.ok ? Boolean(robotsRes.redirect) : false,
-    redirect_target_host: robotsRes.redirect?.target_host ?? null,
-    redirect_target_scheme: robotsRes.redirect?.target_scheme ?? null,
+    redirected: robots.hops > 0,
+    redirect_hops: robots.hops,
+    // The full chain, so a reader can audit which authority actually answered
+    // instead of taking this instrument's word for it.
+    redirect_chain: robots.chain,
+    redirect_target_host: lastHop?.target_host ?? null,
+    redirect_target_scheme: lastHop?.target_scheme ?? null,
+    final_host: safeHost(robots.final_url),
+    redirect_refusal: robots.refusal,
   });
 
   // 2. Per-dialect: policy verdict first, request only if permitted.
   for (const d of DIALECTS) {
     const verdict = robotsOk
       ? isAllowed(robotsText, d.robots_token, '/')
-      : unavailableRobotsVerdict(robotsRes);
+      : unavailableRobotsVerdict(robotsRes, robots.refusal);
 
     const row = {
       ...base,
@@ -312,7 +451,9 @@ export async function probeDomain(rank, domain, { probeUrlImpl = probeUrl, sleep
   // 3. Agent-affordance files, gated on our own token's policy for that path.
   for (const f of SITE_FILES) {
     if (f.id === 'robots') continue; // already done
-    const permitted = robotsOk ? isAllowed(robotsText, 'CanIReachBot', f.path).allowed : unavailableRobotsVerdict(robotsRes).allowed;
+    const permitted = robotsOk
+      ? isAllowed(robotsText, 'CanIReachBot', f.path).allowed
+      : unavailableRobotsVerdict(robotsRes, robots.refusal).allowed;
     if (!permitted) {
       // Keep the schema uniform: a downstream aggregate must never have to
       // distinguish "absent" from "field missing".
