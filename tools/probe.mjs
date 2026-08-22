@@ -16,7 +16,7 @@
 
 import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DIALECTS, SITE_FILES, PROBE_CONTACT } from './dialects.mjs';
+import { DIALECTS, SITE_FILES, PROBE_CONTACT, TOLL_PRESENCE_HEADERS } from './dialects.mjs';
 import { isAllowed, hasExplicitGroup } from './robots.mjs';
 
 const args = process.argv.slice(2);
@@ -29,6 +29,15 @@ const LIMIT = Number(opt('--limit', '0')) || Infinity;
 const CONCURRENCY = Number(opt('--concurrency', '12'));
 const LIST = opt('--list', 'data/domains/tranco-74V8X-1000.csv');
 const RUN = new Date().toISOString().slice(0, 10);
+
+// WHERE we measured from, carried on every row.
+//
+// Access decisions are made on IP reputation and ASN as much as on user-agent, so
+// the same domain can answer differently to a residential host and a datacentre
+// runner. A series that silently changes vantage would show a step change at the
+// switch and read as the web changing its mind. Recording it makes the comparison
+// honest; leaving it 'unspecified' says so out loud rather than guessing.
+const VANTAGE = process.env.CANIREACH_VANTAGE || 'unspecified';
 const OUT = opt('--out', `data/probes/${RUN}.jsonl`);
 
 const TIMEOUT_MS = 12000;
@@ -49,7 +58,6 @@ const CHALLENGES = [
   ['aws-waf', (h, b) => /aws-waf-token/i.test(h['set-cookie'] || '') || /awswaf/i.test(b)],
 ];
 
-const TOLL_HEADERS = ['crawler-price', 'x-payment', 'x-payment-required', 'x402-price', 'payment-required', 'signature-agent'];
 
 function detectChallenge(headers, body) {
   for (const [name, test] of CHALLENGES) {
@@ -63,7 +71,7 @@ function detectChallenge(headers, body) {
 }
 
 function detectToll(status, headers) {
-  const hits = TOLL_HEADERS.filter((h) => headers[h] !== undefined);
+  const hits = TOLL_PRESENCE_HEADERS.filter((h) => headers[h] !== undefined);
   const wwwAuth = headers['www-authenticate'] || '';
   if (/x402|payment|crawler/i.test(wwwAuth)) hits.push('www-authenticate');
   if (status === 402 || hits.length) return { status_402: status === 402, headers: hits };
@@ -177,7 +185,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function probeDomain(rank, domain) {
   const rows = [];
   const ts = new Date().toISOString();
-  const base = { ts, run: RUN, rank, domain };
+  const base = { ts, run: RUN, vantage: VANTAGE, rank, domain };
 
   // 1. robots.txt, always, with our own honest identity. robots.txt is the policy
   //    file itself and is never gated by its own contents.
@@ -364,7 +372,7 @@ async function main() {
       try {
         rows = await probeDomain(rank, domain);
       } catch (err) {
-        rows = [{ ts: new Date().toISOString(), run: RUN, rank, domain, kind: 'error', error: String(err).slice(0, 200) }];
+        rows = [{ ts: new Date().toISOString(), run: RUN, vantage: VANTAGE, rank, domain, kind: 'error', error: String(err).slice(0, 200) }];
       }
       // Append-only. One write per domain keeps rows for a domain contiguous.
       appendFileSync(OUT, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');

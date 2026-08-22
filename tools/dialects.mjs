@@ -74,3 +74,25 @@ export const SITE_FILES = [
   // A site publishing this directory is signalling it will verify signed agents.
   { id: 'web_bot_auth', path: '/.well-known/http-message-signatures-directory' },
 ];
+
+// Toll signals.
+//
+// Two lists, deliberately not one. TOLL_PRESENCE_HEADERS are scanned for by
+// PRESENCE — if the header is there at all, it is a toll signal. `www-authenticate`
+// is NOT one of them: it is present on every ordinary 401, so scanning it by
+// presence would reclassify routine auth walls as pay-per-crawl tolls. It is
+// recorded only when its VALUE mentions a payment scheme, which is why it appears
+// in the recordable-name list but not the scan list.
+//
+// TOLL_HEADER_NAMES is what may legally appear in a published row's `toll.headers`.
+// The validator imports it, so the instrument and the gate cannot drift apart.
+export const TOLL_PRESENCE_HEADERS = [
+  'crawler-price',
+  'x-payment',
+  'x-payment-required',
+  'x402-price',
+  'payment-required',
+  'signature-agent',
+];
+
+export const TOLL_HEADER_NAMES = [...TOLL_PRESENCE_HEADERS, 'www-authenticate'];
