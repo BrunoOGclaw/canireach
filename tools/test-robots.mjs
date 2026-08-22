@@ -67,6 +67,14 @@ eq(
   'multiple wildcard groups merge rather than the last one winning',
 );
 
+// Named blocks at the same specificity merge too. Ignoring the second block can
+// turn a real deny into an unattended request.
+eq(
+  allow('User-agent: GPTBot\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /private\n', 'GPTBot', '/private'),
+  false,
+  'multiple equally specific named groups merge',
+);
+
 // --- path rules ------------------------------------------------------------
 
 eq(allow('User-agent: *\nDisallow:\n', 'X'), true, 'empty Disallow allows everything');

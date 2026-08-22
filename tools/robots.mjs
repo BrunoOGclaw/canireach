@@ -62,6 +62,7 @@ export function selectGroup(groups, token) {
   let wildcard = null;
 
   for (const g of groups) {
+    let groupBestLen = -1;
     for (const a of g.agents) {
       if (a === '*') {
         // Merge multiple wildcard groups rather than letting a later empty one win.
@@ -72,11 +73,18 @@ export function selectGroup(groups, token) {
       // A robots.txt token matches if it is a prefix of our product token
       // (so `Claude` matches `ClaudeBot`), per common implementation practice.
       if (want === a || want.startsWith(a)) {
-        if (a.length > bestLen) {
-          best = g;
-          bestLen = a.length;
-        }
+        groupBestLen = Math.max(groupBestLen, a.length);
       }
+    }
+
+    if (groupBestLen > bestLen) {
+      best = { agents: [...g.agents], rules: [...g.rules] };
+      bestLen = groupBestLen;
+    } else if (groupBestLen >= 0 && groupBestLen === bestLen) {
+      // RFC 9309 requires all equally specific matching groups to be combined.
+      // Keeping only the first can hide a later Disallow and probe past a no.
+      best.agents.push(...g.agents);
+      best.rules.push(...g.rules);
     }
   }
   return best || wildcard || null;

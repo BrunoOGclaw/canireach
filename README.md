@@ -15,7 +15,9 @@ Requirements: Node.js 20 or newer. There are no package dependencies.
 ```sh
 node tools/test-robots.mjs
 node tools/mutate-robots.mjs
-node tools/probe.mjs --limit 10 --concurrency 2
+node tools/test-probe.mjs
+node tools/test-run-artifact.mjs
+node tools/probe.mjs --limit 10 --concurrency 2 --run 2026-08-22-smoke --vantage local-smoke
 ```
 
 The committed input is the top 1,000 domains from Tranco list `74V8X`, fetched
@@ -25,7 +27,27 @@ are never hand-maintained.
 
 See [METHODOLOGY.md](METHODOLOGY.md) for the measurement and safety contract.
 
+## Published data
+
+Every complete capture is validated, hashed, and published as a GitHub Release
+with its raw JSONL, machine-readable manifest, and checksum. Release immutability
+locks the tag and assets after publication. Raw captures do not live in Git
+history and workflow artifacts are only a one-day handoff, never durable storage.
+
+The first pre-September 15 capture is 10,000 rows across 1,000 domains. Its
+[`final corrected immutable manifest`](https://github.com/BrunoOGclaw/canireach/releases/tag/baseline-2026-08-22T0815Z-metadata-correction-v2)
+preserves the exact raw bytes and documents the legacy v1 detail that row `run`
+values contain only `2026-08-22`; the release tag and filename are the canonical
+capture identity. The additive corrections exhaustively disclose the narrow
+selected-header allowlist without rewriting either prior immutable release.
+
+The nightly workflow has a primary 04:17 America/Chicago slot and a 05:17
+fallback. A constant concurrency group prevents overlap, and the fallback exits
+when that local date already has an immutable release. GitHub-hosted measurements
+are labelled `github-actions-ubuntu-dynamic`: their egress IP and location can
+vary, so they must not be described as the same vantage as the first local run.
+
 ## Status
 
-Early baseline instrument. Crowd reports, the MCP tool, and the public map come
-after the owned probe data is flowing.
+Baseline capture and immutable publication are flowing. Derived aggregates and
+quality gates come next; crowd reports, the MCP tool, and the public map follow.
