@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import { DIALECTS } from './dialects.mjs';
 import { INSTRUMENT_POLICY, COMPARABILITY_DIMENSIONS, dimensionValue, dimensionsAgree, UNRECORDED } from './policy.mjs';
-import { probeDomain, probeUrl } from './probe.mjs';
+import { probeDomain, probeUrl, fetchRobots } from './probe.mjs';
 
 const noSleep = async () => {};
 const ok = (status, extra = {}) => ({ ok: true, status, headers: {}, body: '', bytes_read: 0, elapsed_ms: 1, final_url: 'https://example.com/', ...extra });
@@ -89,6 +89,10 @@ assert.equal(
 }
 
 // --- observe: are redirects followed? ---------------------------------------
+//
+// There are TWO redirect policies and they deliberately differ, so both are
+// derived separately. A single declaration covering both would let a change to
+// one of them hide behind the other.
 
 {
   let calls = 0;
@@ -97,8 +101,52 @@ assert.equal(
     return new Response('', { status: 301, headers: { location: 'https://elsewhere.example/' } });
   };
   const res = await probeUrl('https://example.com/', 'TestAgent/1', { fetchImpl });
-  const observed = calls === 1 && res.redirect?.target_host === 'elsewhere.example' ? 'recorded-never-followed' : calls > 1 ? 'followed' : 'unrecorded';
+  const observed =
+    calls === 1 && res.redirect?.target_host === 'elsewhere.example'
+      ? 'probe-target-recorded-never-followed'
+      : calls > 1
+        ? 'probe-target-followed'
+        : 'unrecorded';
   assert.equal(INSTRUMENT_POLICY.redirects, observed, `declared redirects does not match observed ${observed}`);
+}
+
+{
+  // How many consecutive robots.txt redirects does the instrument actually
+  // follow, and does it cross authorities? Counted by handing it an endless
+  // cross-host chain and reading the requests it made, not by reading the
+  // constant beside the loop.
+  const seen = [];
+  const endless = async (url) => {
+    seen.push(url);
+    const at = url === 'https://example.com/robots.txt' ? 0 : Number(/h(\d+)\./.exec(url)[1]);
+    return {
+      ok: true,
+      status: 301,
+      headers: { location: `https://h${at + 1}.example.com/robots.txt` },
+      body: '',
+      bytes_read: 0,
+      elapsed_ms: 1,
+      final_url: url,
+      redirect: null,
+    };
+  };
+  const out = await fetchRobots('example.com', 'TestAgent/1', { probeUrlImpl: endless, sleepImpl: noSleep });
+  const followed = seen.length - 1;
+  const crossed = seen.some((url) => !url.startsWith('https://example.com/'));
+  const observed =
+    followed === 0
+      ? 'recorded-never-followed'
+      : `followed-max-${followed}${crossed ? '-cross-authority' : '-same-authority'}`;
+  assert.equal(
+    INSTRUMENT_POLICY.robots_redirects,
+    observed,
+    `declared robots_redirects does not match observed ${observed}`,
+  );
+  assert.equal(out.refusal, 'redirect-exhausted', 'an endless chain must terminate as unavailable, not spin');
+  assert.ok(
+    COMPARABILITY_DIMENSIONS.includes('instrument_policy.robots_redirects'),
+    'following robots redirects changed the instrument; a capture from before it must not compare equal',
+  );
 }
 
 // --- the derived fields must actually be derived ----------------------------
@@ -107,12 +155,14 @@ assert.deepEqual(INSTRUMENT_POLICY.dialects, DIALECTS.map((d) => d.id).sort());
 assert.ok(INSTRUMENT_POLICY.dialects.length >= 5, 'dialect list looks truncated');
 
 {
+  // probe.mjs now imports ROW_SCHEMA_VERSION rather than repeating the literal,
+  // so the declaration and the rows CANNOT drift — a guarantee is better than a
+  // test for the same property, and an equality check between two reads of one
+  // constant would be theatre. What keeps the number honest instead is
+  // tools/test-run-artifact.mjs, which proves the validator refuses a capture at
+  // any other schema. Asserted here only so the rows are observed at all.
   const [row] = await runWithRobots(ok(200, { body: '' })).then((r) => r.rows);
-  assert.equal(
-    INSTRUMENT_POLICY.row_schema_version,
-    row.schema_version,
-    'declared row schema version does not match the rows the probe writes',
-  );
+  assert.equal(row.schema_version, INSTRUMENT_POLICY.row_schema_version);
 }
 
 // --- the unrecorded rule, which is what protects the pre-automation baseline --

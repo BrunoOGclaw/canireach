@@ -19,7 +19,8 @@ import { join } from 'node:path';
 import { aggregate } from './aggregate.mjs';
 import { SITE_FILES } from './dialects.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
-import { SITE_ORIGIN, buildSite, loadVerifiedCapture } from './build-site.mjs';
+import { DIMENSION_WORDS, SITE_ORIGIN, buildSite, comparabilityPhrase, loadVerifiedCapture } from './build-site.mjs';
+import { COMPARABILITY_DIMENSIONS } from './policy.mjs';
 
 const REAL_CAPTURE = 'data/probes/2026-08-22T0815Z.jsonl';
 const REAL_MANIFEST = 'data/probes/2026-08-22T0815Z.final.manifest.json';
@@ -270,6 +271,32 @@ function runSuite(label, capture, manifest) {
         `llms.txt advertises ${url}, which this build does not produce`,
       );
     }
+  });
+
+  // The method page describes the comparability gate. If it describes a WEAKER
+  // gate than the one that runs, that is a marketing claim, and the way it would
+  // happen is a dimension being added to policy.mjs while the prose stayed put.
+  t('the method page names every comparability dimension the gate enforces', () => {
+    const method = file('method.html');
+    for (const path of COMPARABILITY_DIMENSIONS) {
+      ok(DIMENSION_WORDS[path], `no site wording for ${path}`);
+      ok(method.includes(DIMENSION_WORDS[path]), `method page does not describe ${path}`);
+    }
+    // And the guard is real: a dimension the copy has no words for must stop the
+    // build, not quietly drop off the page.
+    let refused = false;
+    try {
+      comparabilityPhrase([...COMPARABILITY_DIMENSIONS, 'instrument_policy.invented']);
+    } catch {
+      refused = true;
+    }
+    ok(refused, 'the build accepted a comparability dimension it cannot describe');
+  });
+
+  t('the method page keeps the two redirect policies apart', () => {
+    const method = file('method.html');
+    ok(/five consecutive redirects/i.test(method), 'method page does not state the robots.txt redirect budget');
+    ok(/context of the domain we asked about/i.test(method), 'method page does not state the initial-authority rule');
   });
 
   t('the limitations the data cannot show are stated on the page', () => {

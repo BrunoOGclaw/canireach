@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createArtifacts, validateRun, verifyArtifacts } from './finalize-run.mjs';
-import { INSTRUMENT_POLICY } from './policy.mjs';
+import { INSTRUMENT_POLICY, ROW_SCHEMA_VERSION } from './policy.mjs';
 
 const RUN = '2026-08-22-slot0417-gh1a1';
 const VANTAGE = 'github-actions-ubuntu-dynamic';
@@ -14,7 +14,7 @@ const FILES = ['robots', 'llms_txt', 'agents_md', 'wellknown_agents', 'web_bot_a
 
 function fixtureRows() {
   const base = {
-    schema_version: 2,
+    schema_version: ROW_SCHEMA_VERSION,
     ts: '2026-08-22T09:17:00.000Z',
     run: RUN,
     vantage: VANTAGE,
@@ -49,6 +49,79 @@ function mustFail(label, transform, raw = null) {
   const c = makeCase(transform, raw);
   assert.throws(() => validateRun(c.file, { run: RUN, list: c.list, vantage: VANTAGE }), undefined, label);
 }
+
+// The declared row schema is a comparability dimension, and probe.mjs now reads
+// it from the same constant the manifest does — so the two cannot drift and the
+// old equality check between them proves nothing. What is worth proving is that
+// the number is LOAD-BEARING: a capture at any other schema must be refused, or
+// the dimension is decoration.
+mustFail('a row one schema behind', (rows) =>
+  rows.map((row, i) => (i === 0 ? { ...row, schema_version: ROW_SCHEMA_VERSION - 1 } : row)),
+);
+mustFail('a row one schema ahead', (rows) =>
+  rows.map((row, i) => (i === 0 ? { ...row, schema_version: ROW_SCHEMA_VERSION + 1 } : row)),
+);
+
+// The robots redirect chain is the audit trail for a followed policy document.
+mustFail('a redirect chain whose length disagrees with its hop count', (rows) =>
+  rows.map((row) => (row.file === 'robots' ? { ...row, redirect_hops: 2, redirect_chain: [] } : row)),
+);
+mustFail('a chain longer than the follow budget', (rows) =>
+  rows.map((row) =>
+    row.file === 'robots'
+      ? {
+          ...row,
+          redirect_hops: 7,
+          redirect_chain: Array.from({ length: 7 }, () => ({
+            status: 301,
+            target_host: 'www.example.com',
+            target_scheme: 'https',
+            cross_authority: true,
+          })),
+        }
+      : row,
+  ),
+);
+mustFail('a non-redirect status inside the redirect chain', (rows) =>
+  rows.map((row) =>
+    row.file === 'robots'
+      ? {
+          ...row,
+          redirect_hops: 1,
+          redirect_chain: [{ status: 200, target_host: 'www.example.com', target_scheme: 'https', cross_authority: true }],
+        }
+      : row,
+  ),
+);
+// Two separate guards meet on a redirect hop, and only one of them is the key
+// allowlist: `ua` is ALSO a forbidden stored key, so a leak fixture using it
+// would pass through the privacy scan and never exercise assertKeys at all.
+mustFail('an unapproved but harmless key inside a redirect hop', (rows) =>
+  rows.map((row) =>
+    row.file === 'robots'
+      ? {
+          ...row,
+          redirect_hops: 1,
+          redirect_chain: [
+            { status: 301, target_host: 'www.example.com', target_scheme: 'https', cross_authority: true, note: 'x' },
+          ],
+        }
+      : row,
+  ),
+);
+mustFail('a forbidden stored key inside a redirect hop', (rows) =>
+  rows.map((row) =>
+    row.file === 'robots'
+      ? {
+          ...row,
+          redirect_hops: 1,
+          redirect_chain: [
+            { status: 301, target_host: 'www.example.com', target_scheme: 'https', cross_authority: true, ua: 'leaked' },
+          ],
+        }
+      : row,
+  ),
+);
 
 const good = makeCase();
 const summary = validateRun(good.file, { run: RUN, list: good.list, vantage: VANTAGE });

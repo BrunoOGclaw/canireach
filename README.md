@@ -103,11 +103,16 @@ ingest endpoint yet. See METHODOLOGY.md for the promotion rules and the abuse
 and retention limits. The agent-facing MCP tool is above. The public map, and
 the site pages that document the tool, follow.
 
-Known limit, measured rather than estimated: on the 2026-08-22T162332Z capture
-only **195 of 1,000 domains** carry any behavioural evidence at all. 452 domains
-redirect their `robots.txt`, and this instrument records redirects without
-following them, so its fail-closed policy stops those doors before a request is
-sent. RFC 9309 §2.3.1.2 says crawlers SHOULD follow at least five consecutive
-redirects for robots.txt, so this is a conformance gap and not a judgement call.
-Fixing it changes a declared comparability dimension, which is why it is a
-tracked card rather than a quiet patch.
+Fixed limit, measured rather than estimated: on the 2026-08-22T162332Z capture
+only **195 of 1,000 domains** carried any behavioural evidence at all. 452
+domains redirect their `robots.txt` — 374 to their own `www.` host — and the
+instrument recorded those redirects without following them, so its fail-closed
+policy stopped those doors before a request was sent. RFC 9309 §2.3.1.2 says
+crawlers SHOULD follow at least five consecutive redirects for robots.txt, even
+across authorities, so that was a conformance gap and not a judgement call.
+Schema v3 follows them, applies the policy in the context of the initial
+authority, and publishes the chain. The probe target's redirect policy is
+unchanged and a test proves it is unchanged, because a change that relaxed both
+would be indistinguishable from this one in the aggregates. Captures either side
+of the change are not strictly comparable and `tools/compare.mjs` withholds
+across the boundary by design.

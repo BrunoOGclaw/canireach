@@ -22,16 +22,34 @@
 
 import { DIALECTS } from './dialects.mjs';
 
-/** Row schema written by probe.mjs. v1 bytes exist and are immutable. */
-export const ROW_SCHEMA_VERSION = 2;
+/**
+ * Row schema written by probe.mjs. v1 and v2 bytes exist and are immutable.
+ *
+ * v3 adds the robots.txt redirect chain (`redirect_chain`, `redirect_hops`,
+ * `final_host`, `redirect_refusal`) to the robots file row, and changes what
+ * that row's `status` MEANS: it is now the status of the response the policy was
+ * read from, not the status of the first hop. That is a shape change and a
+ * semantic change, so it gets a number rather than a note.
+ */
+export const ROW_SCHEMA_VERSION = 3;
 
 export const INSTRUMENT_POLICY = {
-  profile_version: 1,
+  profile_version: 2,
   row_schema_version: ROW_SCHEMA_VERSION,
   // What happens when robots.txt cannot be read as policy.
   robots_unavailable: 'fail-closed-except-404-410',
-  // What happens on a 3xx.
-  redirects: 'recorded-never-followed',
+  // What happens on a 3xx from the PROBE TARGET. Unchanged since profile 1; the
+  // string is respelled so that a v1-profile capture cannot compare EQUAL to a
+  // v2-profile one on a dimension whose meaning narrowed underneath it. It used
+  // to describe robots.txt too, and it no longer does.
+  redirects: 'probe-target-recorded-never-followed',
+  // What happens on a 3xx from robots.txt. NEW in profile 2 and the reason the
+  // profile version moved: RFC 9309 §2.3.1.2 requires following these, and not
+  // doing so left 452 of the top 1,000 domains with unreadable policy and
+  // therefore no behavioural evidence at all. Captures either side of this are
+  // NOT strictly comparable, which is the gate working: an old manifest reports
+  // `unrecorded` here, and `unrecorded` never equals anything.
+  robots_redirects: 'followed-max-5-cross-authority',
   // What happens after a denial.
   denial_gate: 'no-request-past-a-denial',
   // Which identities were presented. Derived, so it cannot drift from dialects.mjs.
@@ -60,6 +78,7 @@ export const COMPARABILITY_DIMENSIONS = [
   'instrument_policy.row_schema_version',
   'instrument_policy.robots_unavailable',
   'instrument_policy.redirects',
+  'instrument_policy.robots_redirects',
   'instrument_policy.denial_gate',
   'instrument_policy.dialects',
 ];

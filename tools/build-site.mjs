@@ -15,8 +15,42 @@ import { dirname, join } from 'node:path';
 import { aggregate } from './aggregate.mjs';
 import { loadVerifiedCapture } from './capture.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
+import { COMPARABILITY_DIMENSIONS } from './policy.mjs';
 
 export const SITE_ORIGIN = 'https://canireach.ai';
+
+/**
+ * Plain-English name for each comparability dimension, for the method page.
+ *
+ * The page used to restate the list in prose, which meant adding a dimension
+ * silently narrowed what the site claimed to check — the fifth or sixth time
+ * this repository has found "a list covers what its author thought of". The
+ * phrases are still hand-written, because a dotted path is not English, but the
+ * SET is derived and the build REFUSES a dimension it has no words for. A page
+ * describing a weaker gate than the one that runs is a marketing claim.
+ */
+export const DIMENSION_WORDS = {
+  'vantage.class': 'vantage class',
+  'observation_window.slot': 'observation slot',
+  'input.sha256': 'input list',
+  'instrument_policy.row_schema_version': 'row schema',
+  'instrument_policy.robots_unavailable': 'robots-unavailable policy',
+  'instrument_policy.redirects': 'probe-target redirect policy',
+  'instrument_policy.robots_redirects': 'robots.txt redirect policy',
+  'instrument_policy.denial_gate': 'denial gate',
+  'instrument_policy.dialects': 'caller set',
+};
+
+export function comparabilityPhrase(dimensions = COMPARABILITY_DIMENSIONS) {
+  const missing = dimensions.filter((path) => !DIMENSION_WORDS[path]);
+  if (missing.length) {
+    const err = new Error(`site copy has no wording for comparability dimension(s): ${missing.join(', ')}`);
+    err.exitCode = 3;
+    throw err;
+  }
+  const words = dimensions.map((path) => DIMENSION_WORDS[path]);
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+}
 
 const DEFAULT_CAPTURE = 'data/probes/2026-08-22T0815Z.jsonl';
 const DEFAULT_MANIFEST = 'data/probes/2026-08-22T0815Z.final.manifest.json';
@@ -234,7 +268,8 @@ function methodBody(s) {
 <p>The headline reachability rate is over requests <em>sent</em>. Dividing by all attempts would fold our own compliance into the web's hostility and make the web look more hostile than it is.</p>
 <h2>Comparability</h2>
 <p>${esc(s.limitations.vantage_note)}</p>
-<p>The repository refuses to emit a cross-capture delta unless vantage class, input list, row schema, robots-unavailable policy, redirect policy, denial gate and caller set all match. An unrecorded dimension never counts as agreement with another unrecorded dimension.</p>
+<p>The repository refuses to emit a cross-capture delta unless ${esc(comparabilityPhrase())} all match. An unrecorded dimension never counts as agreement with another unrecorded dimension.</p>
+<p>The probe follows up to five consecutive redirects for <code>robots.txt</code>, as RFC 9309 requires, and applies the policy it finds in the context of the domain we asked about. It follows none for the page it is measuring: that destination has not been checked against robots itself. Those two policies are recorded separately, so relaxing one cannot hide behind the other.</p>
 <h2>Full detail</h2>
 <p><a href="${esc(s.source.methodology)}">METHODOLOGY.md</a> · <a href="${esc(s.source.repository)}">source</a> · <a href="${esc(s.source.releases)}">every capture, with hashes</a></p>`;
 }
