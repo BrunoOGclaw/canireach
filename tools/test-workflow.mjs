@@ -13,15 +13,28 @@ const ci = readFileSync(fileURLToPath(ciUrl), 'utf8');
 // specific and had already happened: test-aggregate.mjs existed, ran in CI, and
 // was absent from the nightly's pre-flight gate, so the unattended run that
 // actually touches the network was proving less than the pull request did.
-const suite = readdirSync(fileURLToPath(new URL('.', import.meta.url)))
+const toolsDir = fileURLToPath(new URL('.', import.meta.url));
+const suite = readdirSync(toolsDir)
   .filter((f) => /^test-.*\.mjs$/.test(f))
   .sort();
 assert.ok(suite.length >= 6, `test discovery found only ${suite.length} files`);
+
+// The mutation gates get the same treatment, and for the same reason one layer
+// down: both workflows used to name `mutate-robots.mjs` by hand, so a second
+// vacuity guard could be added and neither gate would ever run it. A guard
+// nobody runs is indistinguishable from a guard that passes.
+const mutants = readdirSync(toolsDir)
+  .filter((f) => /^mutate-.*\.mjs$/.test(f))
+  .sort();
+assert.ok(mutants.length >= 2, `mutation-gate discovery found only ${mutants.length} files`);
+
 for (const [label, text] of [['nightly', workflow], ['ci', ci]]) {
   assert.match(text, /for t in tools\/test-\*\.mjs; do/, `${label} must discover the suite, not list it`);
-  assert.match(text, /node tools\/mutate-robots\.mjs/, `${label} must run the robots mutation gate`);
+  assert.match(text, /for m in tools\/mutate-\*\.mjs; do/, `${label} must discover the mutation gates, not list them`);
+  assert.doesNotMatch(text, /node tools\/mutate-[a-z]+\.mjs/, `${label} must not hand-list a mutation gate`);
   // A discovery loop that ran nothing would pass a `for` loop silently.
   assert.match(text, /node "\$t"/, `${label} must execute each discovered test`);
+  assert.match(text, /node "\$m"/, `${label} must execute each discovered mutation gate`);
 }
 
 assert.match(workflow, /cron: '17 4,5 \* \* \*'/);

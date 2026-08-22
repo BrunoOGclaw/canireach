@@ -374,7 +374,12 @@ function classifyFile(id, res) {
   return { present: true, soft404: false };
 }
 
-function classifyOutcome(status, challenge, toll) {
+// Exported so tools/test-reports.mjs can derive the outcome vocabulary by
+// RUNNING this classifier rather than by reading the list beside it. A crowd
+// report has to be spelled the way a capture is spelled or it can never be
+// matched against one, and two lists drifting apart would disable corroboration
+// without failing anything.
+export function classifyOutcome(status, challenge, toll) {
   if (challenge) return 'challenged';
   if (toll) return 'toll';
   if (status >= 300 && status < 400) return 'redirected';

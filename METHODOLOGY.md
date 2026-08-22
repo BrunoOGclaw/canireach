@@ -144,6 +144,70 @@ Recomputation does not soften the comparability gate — it is what allows the
 gate to be *reached*. The two published captures still refuse to be differenced,
 now for the substantive reason rather than a structural one.
 
+## Crowd reports and quarantine
+
+Our own probes are ground truth: one vantage, one hour, one thousand domains.
+Reports from other agents exist to cover the doors we cannot reach — other
+networks, other hours, other identities, authenticated sessions we will never
+hold. They are also free to fabricate, so nothing a stranger sends us is data
+when it arrives.
+
+Every accepted report enters `quarantined` and stays there until evidence we did
+not receive from the reporter promotes it. State is **derived** on every
+resolution from the evidence present, never stored and never set by hand, and
+`tools/reports.mjs` refuses to resolve without an explicit clock so that any
+published resolution is recomputable by a stranger.
+
+**Promotion** requires one of exactly two things:
+
+- an **owned-probe match** — a capture row agreeing on domain, dialect class and
+  outcome, observed within 180 minutes of the report. The lag bound is not
+  decoration: our capture is one instant per night, and a probe fourteen hours
+  away agreeing with a report is a coincidence of the clock. This is the same
+  rule the capture-to-capture comparison already enforces, one layer down.
+- **multiple independent verified reporters** — at least two distinct Web Bot
+  Auth key thumbprints. A self-declared `reporter_id` is worth **zero** toward
+  promotion no matter how many agree, because minting a thousand of them costs
+  one loop. Unsigned reporters are promotable only by a probe match.
+
+A reputation path, by which a long-lived unsigned reporter with a probe-matched
+history earns standing, is deliberately **not built**. Until it exists, the rule
+above is the whole rule.
+
+**Contested.** Two promoted claims about the same domain, identity class and
+hour with different outcomes demote each other. Publishing either as fact would
+be publishing a coin flip.
+
+**Two keys, kept separate.** `submission_key` (reporter + report id) collapses
+exact resubmissions; `claim_key` (domain + dialect class + outcome + hour)
+groups observations for corroboration. Collapsing them into one "deduplication
+key" would turn one reporter pressing retry into a crowd of agreeing observers.
+
+**The counts are never added.** `submissions`, `distinct_submissions`, `claims`,
+`corroborated_claims` and `distinct_verified_identities` are separate numbers.
+Only corroborated claims are publishable as access data. The agreed kill metric
+counts submissions, which is the weakest of them — and quoting it as if it were
+the strongest is how a dataset manufactures its own launch.
+
+### Abuse and retention limits
+
+- Reports are retained **90 days** from receipt, then expire.
+- An observation more than **7 days** older than its receipt is retained but
+  cannot corroborate: by then neither our probes nor another reporter can speak
+  to that moment.
+- `observed_at` is chosen by the reporter and `received_at` by us; both are
+  stored. An observation dated more than 5 minutes into the future relative to
+  receipt is rejected, so a reporter cannot place an observation inside a
+  capture window on purpose to manufacture a match.
+- Per-identity ceilings, per rolling day: 5,000 verified, 500 self-declared,
+  50 anonymous.
+- The envelope is a strict **allowlist**; an unknown field is a rejection, not a
+  strip. Reports carry no page content, headers, cookies, IP addresses, URLs
+  beyond a bare hostname, or personal data. The allowlist itself is guarded, so
+  widening it to a forbidden field fails the build.
+- There is **no ingest endpoint yet**, and no unauthenticated public write
+  surface is authorised. This is the schema and the state machine only.
+
 ## Input provenance
 
 `data/domains/tranco-74V8X-1000.csv` contains ranks 1-1000 from Tranco list

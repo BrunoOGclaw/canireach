@@ -15,11 +15,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: node tools/mutate-robots.mjs
-      # Discovered, not listed. A new tools/test-*.mjs is enforced the moment it
-      # exists; a list has to be remembered, and this one had already drifted.
+      # Discovered, not listed — the mutation gates as well as the suites. A new
+      # tools/test-*.mjs or tools/mutate-*.mjs is enforced the moment it exists;
+      # a list has to be remembered, and both of these had already drifted once.
       - run: |
           set -euo pipefail
+          for m in tools/mutate-*.mjs; do
+            echo "--- $m"
+            node "$m"
+          done
           for t in tools/test-*.mjs; do
             echo "--- $t"
             node "$t"
