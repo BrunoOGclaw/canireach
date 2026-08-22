@@ -25,71 +25,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UNRECORDED, observationWindow } from './policy.mjs';
+import { assertExtracted, extractRunScript } from './workflow-step.mjs';
 
 const STEP_NAME = 'Plan one capture per local date';
 const workflowPath = fileURLToPath(new URL('../.github/workflows/nightly-baseline.yml', import.meta.url));
-
-/**
- * Pull the step's `run:` block out of the YAML by indentation.
- *
- * The hazard here is a silent one: an extractor that quietly matched nothing
- * would hand every case below an empty script, bash would exit 0, and a suite
- * that tested nothing at all would print green. So the extraction is asserted to
- * have found the real thing before a single case runs.
- */
-function extractRunScript(yaml, stepName) {
-  const lines = yaml.split('\n');
-  const stepAt = lines.findIndex((l) => l.trim() === `- name: ${stepName}`);
-  assert.ok(stepAt >= 0, `step not found in workflow: ${stepName}`);
-
-  const stepIndent = lines[stepAt].indexOf('- name:');
-  let runAt = -1;
-  for (let i = stepAt + 1; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (line.trim() === '') continue;
-    const indent = line.length - line.trimStart().length;
-    // A new list item at or left of this step's indent means the step ended
-    // without a `run:` — which must fail loudly rather than scan into the next.
-    if (indent <= stepIndent) break;
-    if (line.trim() === 'run: |') {
-      runAt = i;
-      break;
-    }
-  }
-  assert.ok(runAt >= 0, `step has no "run: |" block: ${stepName}`);
-
-  const bodyIndent = lines[runAt].length - lines[runAt].trimStart().length + 2;
-  const body = [];
-  for (let i = runAt + 1; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (line.trim() === '') {
-      body.push('');
-      continue;
-    }
-    if (line.length - line.trimStart().length < bodyIndent) break;
-    body.push(line.slice(bodyIndent));
-  }
-  // Trailing blank lines are an artifact of the block scalar, not the program.
-  while (body.length && body[body.length - 1] === '') body.pop();
-  return body.join('\n');
-}
 
 const script = extractRunScript(readFileSync(workflowPath, 'utf8'), STEP_NAME);
 
 // Non-vacuity of the extraction itself. If the workflow is restructured so these
 // anchors move, this test must go red and be rewritten against the new shape —
 // not keep passing against a fragment.
-assert.ok(script.length > 200, `extracted script is implausibly short (${script.length} bytes)`);
-for (const anchor of [
+assertExtracted(script, [
   'set -euo pipefail',
   'gh release list',
   'should_run=',
   'capture_id=',
   'scheduled_slot=',
   '$GITHUB_OUTPUT',
-]) {
-  assert.ok(script.includes(anchor), `extracted script is missing anchor: ${anchor}`);
-}
+], 'planning step');
 
 const root = mkdtempSync(join(tmpdir(), 'canireach-preflight-'));
 const binDir = join(root, 'bin');

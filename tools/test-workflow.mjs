@@ -33,7 +33,9 @@ assert.match(workflow, /--json tagName,isDraft,isImmutable/);
 assert.match(workflow, /!x\.isDraft&&x\.isImmutable/);
 
 const capture = workflow.slice(workflow.indexOf('  capture:'), workflow.indexOf('  publish:'));
-const publish = workflow.slice(workflow.indexOf('  publish:'), workflow.indexOf('  failure-alert:'));
+const publish = workflow.slice(workflow.indexOf('  publish:'), workflow.indexOf('  series:'));
+const series = workflow.slice(workflow.indexOf('  series:'), workflow.indexOf('  failure-alert:'));
+assert.ok(publish.length > 100 && series.length > 100, 'job slicing found nothing; the boundaries moved');
 assert.match(capture, /permissions:\n      contents: read/);
 assert.match(capture, /persist-credentials: false/);
 assert.doesNotMatch(capture, /github\.token|GH_TOKEN|gh release/);
@@ -52,6 +54,25 @@ assert.ok(immutableCheck > publishDraft, 'published release must be proven immut
 assert.ok(preserveImmutable > immutableCheck, 'mutable publication failures must remain cleanup-eligible');
 assert.ok(verifyRelease > preserveImmutable, 'attestation must follow immutable-state proof');
 assert.match(publish, /gh release delete "\$tag" .* --cleanup-tag --yes/);
+
+// The series comparison is derived work standing downstream of an unrecoverable
+// one. Two properties keep it from ever costing a night:
+//   - nothing depends on it, so it cannot block or fail the capture; and
+//   - it never holds `contents: write`, so it cannot touch a release.
+assert.match(series, /needs: \[preflight, capture, publish\]/);
+assert.match(series, /permissions:\n      contents: read\n      issues: write/);
+// Anchored to the key, not the word: the job's own comment says `contents: write`
+// to explain why it must not have it.
+assert.doesNotMatch(series, /^\s+contents: write/m);
+assert.doesNotMatch(series, /probe\.mjs/);
+for (const [job, block] of [['capture', capture], ['publish', publish], ['failure-alert', workflow.slice(workflow.indexOf('  failure-alert:'))]]) {
+  assert.doesNotMatch(block, /needs:.*series/, `${job} must not depend on the series comparison`);
+}
+// Withheld and no-partner are findings; only a comparison that never reached the
+// gate is a broken job. Collapsing them would make the gate holding look like a
+// failure, and a failure look like the gate holding.
+assert.match(series, /if \[ "\$select_code" = 4 \]/, 'no-partner must be handled distinctly');
+assert.match(series, /\[ "\$compare_code" = 0 \] \|\| \[ "\$compare_code" = 3 \] \|\| exit "\$compare_code"/);
 
 for (const use of workflow.matchAll(/uses:\s*([^\s#]+)/g)) {
   assert.match(use[1], /^[^@]+@[0-9a-f]{40}$/, `action is not pinned to a full SHA: ${use[1]}`);
