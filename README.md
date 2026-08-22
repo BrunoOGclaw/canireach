@@ -17,6 +17,7 @@ node tools/test-robots.mjs
 node tools/mutate-robots.mjs
 node tools/test-probe.mjs
 node tools/test-run-artifact.mjs
+node tools/test-aggregate.mjs
 node tools/probe.mjs --limit 10 --concurrency 2 --run 2026-08-22-smoke --vantage local-smoke
 ```
 
@@ -49,5 +50,7 @@ vary, so they must not be described as the same vantage as the first local run.
 
 ## Status
 
-Baseline capture and immutable publication are flowing. Derived aggregates and
-quality gates come next; crowd reports, the MCP tool, and the public map follow.
+Baseline capture and immutable publication are flowing, and derived aggregates
+are computed from the published bytes (`node tools/aggregate.mjs <capture.jsonl>`,
+reading both schema v1 and v2 so the immutable first baseline stays comparable).
+Crowd reports, the MCP tool, and the public map follow.
