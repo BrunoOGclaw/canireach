@@ -228,6 +228,104 @@ jobs:
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$verify_dir"
           (cd "$verify_dir" && sha256sum -c "${CAPTURE_ID}.sha256")
 
+  # The night-over-night comparison. Deliberately a SEPARATE job, after publish
+  # and needed by nothing: a capture is unrecoverable and a derived computation
+  # must never be able to cost one. If this job is wrong, the night is still
+  # captured and the delta is recomputable by anyone from two immutable releases.
+  #
+  # It reads both sides from the published releases rather than from the capture
+  # job's artifact, so it compares exactly what a stranger downloading them would.
+  series:
+    needs: [preflight, capture, publish]
+    if: needs.preflight.outputs.should_run == 'true' && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Never `contents: write`. This job must not be able to touch a release.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CAPTURE_ID: ${{ needs.preflight.outputs.capture_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Compare against the previous capture in this slot
+        id: series
+        run: |
+          set -euo pipefail
+          tag="baseline-${CAPTURE_ID}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt,isDraft,isImmutable > releases.json
+
+          set +e
+          partner=$(node tools/series.mjs select \
+            --releases releases.json --current-tag "$tag" --out pair.json --print-tag)
+          select_code=$?
+          set -e
+          # 4 is "no prior capture in this slot yet" — the normal state of the
+          # first night in a slot, and not a failure of anything.
+          if [ "$select_code" = 4 ]; then
+            echo "verdict=no-partner" >> "$GITHUB_OUTPUT"
+            echo "No series partner yet: $(node -e 'console.log(JSON.parse(require("fs").readFileSync("pair.json","utf8")).reason)')" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$select_code" = 0 ] || exit "$select_code"
+
+          gh release download "$partner" --repo "$GITHUB_REPOSITORY" --dir prior
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir current
+
+          set +e
+          node tools/series.mjs compare \
+            --pair pair.json \
+            --prior-manifest "prior/${partner#baseline-}.manifest.json" \
+            --current-manifest "current/${CAPTURE_ID}.manifest.json" \
+            --out comparison.json
+          compare_code=$?
+          set -e
+          case "$compare_code" in
+            0) verdict=delta ;;
+            3) verdict=withheld ;;
+            *) verdict=could-not-perform ;;
+          esac
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          {
+            echo "Series partner: \`$partner\`"
+            echo ""
+            echo "Verdict: **$verdict**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 3 is the gate holding, which is a finding rather than a broken job.
+          # Anything else means the comparison never reached the gate.
+          [ "$compare_code" = 0 ] || [ "$compare_code" = 3 ] || exit "$compare_code"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && hashFiles('comparison.json') != ''
+        with:
+          name: series-${{ needs.preflight.outputs.capture_id }}
+          path: |
+            pair.json
+            comparison.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report a withheld or unperformable comparison
+        if: always() && steps.series.outputs.verdict != 'delta' && steps.series.outputs.verdict != 'no-partner'
+        env:
+          MARKER: <!-- canireach-series:${{ github.run_id }}:${{ github.run_attempt }} -->
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERDICT: ${{ steps.series.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          comments=$(gh api "repos/${GITHUB_REPOSITORY}/issues/2/comments" --paginate --slurp)
+          if COMMENTS="$comments" node -e "const a=JSON.parse(process.env.COMMENTS).flat();process.exit(a.some(x=>x.body.includes(process.env.MARKER))?0:1)"; then
+            exit 0
+          fi
+          gh issue comment 2 \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$MARKER Series comparison for \`${CAPTURE_ID}\`: **${VERDICT:-could-not-perform}**. run=$RUN_URL"
+
   failure-alert:
     needs: [preflight, capture, publish]
     if: >-
