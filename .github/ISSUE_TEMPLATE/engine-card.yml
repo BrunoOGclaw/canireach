@@ -1,0 +1,27 @@
+name: Engine card
+description: A bounded, independently landable Can I Reach build card
+title: "[card] "
+labels: ["engine-card"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: The user-visible or instrument-visible outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Exact checks that can independently pass or fail.
+    validations:
+      required: true
+  - type: textarea
+    id: rails
+    attributes:
+      label: Safety rails
+      description: Access, privacy, identity, cost, and rollout constraints.
+    validations:
+      required: true
+
