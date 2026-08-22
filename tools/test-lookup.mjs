@@ -21,11 +21,14 @@ import {
   PRESENT_TENSE_FIELD_NAMES,
   assertNoPresentTenseField,
   buildIndex,
+  comparabilityProfile,
   crowdBlock,
   datasetStatus,
   lookup,
   normalizeDomain,
+  robotsUnavailableBehaviour,
 } from './lookup.mjs';
+import { COMPARABILITY_DIMENSIONS, UNRECORDED } from './policy.mjs';
 
 let pass = 0;
 const failures = [];
@@ -519,20 +522,228 @@ eq(
 // whatever third party the caller names. The charter forbids it, so it is
 // checked mechanically here rather than trusted to review.
 
-for (const file of ['lookup.mjs', 'mcp-server.mjs']) {
-  const src = readFileSync(join(HERE, file), 'utf8');
-  // Comments describe the rail; code must not break it. Strip comments first so
-  // the prose above does not make this check pass or fail for the wrong reason.
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  ok(!/\bfetch\s*\(/.test(code), `${file} makes no fetch call`);
-  ok(!/from '\.\/probe\.mjs'/.test(code), `${file} does not import the prober`);
-  ok(!/child_process|node:http|node:net|node:dgram|node:tls/.test(code), `${file} opens no process or socket`);
-  ok(!/writeFileSync|appendFileSync|rmSync|unlinkSync/.test(code), `${file} writes nothing to disk`);
+// This scan used to run over a HAND-LISTED pair, `lookup.mjs` and
+// `mcp-server.mjs`. But the server loads whatever those two import, and today
+// that is capture.mjs, reports.mjs, dialects.mjs and policy.mjs — four modules
+// running inside the tool with the rail asserted on neither. A `fetch(` in any
+// of them would have been a probing MCP server under a green rail. Nobody had
+// to do anything wrong for that hole to open: it opened the moment a module
+// grew an import, which is the ninth time this repository has found that a list
+// covers what its author thought of.
+//
+// So the graph is WALKED from the entry points instead of enumerated.
+
+const RAIL_ENTRY_POINTS = ['lookup.mjs', 'mcp-server.mjs'];
+
+const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+/**
+ * Drop a module's CLI main block.
+ *
+ * The rail being asserted is "nothing the SERVER can reach touches the network,
+ * a process, or the disk". Several of these modules are also runnable scripts,
+ * and `aggregate.mjs`'s `--out` flag writes a file — from inside
+ * `if (import.meta.url === \`file://${process.argv[1]}\`)`, which the server can
+ * never enter, because the server is not argv[1].
+ *
+ * That is a real boundary, not a convenient one, but a stripper that quietly
+ * matched nothing would silently restore the old two-file coverage while the
+ * loop still read as seven. So it is checked below: it must have fired at least
+ * once across the graph, and it must both remove a guarded block and keep the
+ * code around it.
+ */
+const CLI_MAIN = /if\s*\(\s*import\.meta\.url\s*===[\s\S]*$/;
+const stripCliMain = (code) => code.replace(CLI_MAIN, '');
+
+/** Every local module reachable from `entries` by a static import. */
+function localImportGraph(entries) {
+  const seen = new Set();
+  const queue = [...entries];
+  while (queue.length) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    // Comments are stripped BEFORE extraction, not after. lookup.mjs's own
+    // prose names `./probe.mjs` while explaining that it never imports it, and
+    // an extractor reading comments would pull the prober into the graph and
+    // fail the rail on the strength of a sentence.
+    const code = stripComments(readFileSync(join(HERE, file), 'utf8'));
+    for (const m of code.matchAll(/\bfrom\s+'(\.\/[^']+)'/g)) queue.push(m[1].slice(2));
+  }
+  return [...seen].sort();
 }
+
+const railModules = localImportGraph(RAIL_ENTRY_POINTS);
+
+// The generalization has to actually generalize. If the walk returned only the
+// two entry points, every check below would be the old hand-listed check
+// wearing a loop, and it would read as broader coverage while covering the same
+// two files.
+ok(
+  railModules.length > RAIL_ENTRY_POINTS.length,
+  `the import walk found only ${railModules.join(', ')}; it is not reaching past the entry points`,
+);
+ok(
+  !railModules.includes('probe.mjs'),
+  `the prober is reachable from the MCP server through ${railModules.join(', ')}`,
+);
+
+let cliBlocksStripped = 0;
+for (const file of railModules) {
+  const full = stripComments(readFileSync(join(HERE, file), 'utf8'));
+  const code = stripCliMain(full);
+  if (code.length !== full.length) cliBlocksStripped++;
+  ok(!/\bfetch\s*\(/.test(code), `${file} makes no fetch call`);
+  ok(!/child_process|node:http|node:net|node:dgram|node:tls/.test(code), `${file} opens no process or socket`);
+  // Call sites, not identifiers — the same shape as the `fetch(` check beside
+  // it. `aggregate.mjs` imports `writeFileSync` at module scope and calls it
+  // only from its CLI block, and a bare name in an import list writes nothing.
+  // Matching the name flagged that as a disk write, which is the kind of false
+  // positive that gets a rail relaxed rather than fixed.
+  ok(!/\b(writeFileSync|appendFileSync|rmSync|unlinkSync)\s*\(/.test(code), `${file} writes nothing to disk`);
+}
+ok(cliBlocksStripped > 0, 'the CLI-main stripper matched nothing anywhere; the rail is scanning whole files again');
+console.log(
+  `ok   no-network rail asserted on ${railModules.length} modules (${cliBlocksStripped} CLI blocks excluded): ${railModules.join(', ')}`,
+);
 
 // And the rail is enforceable: the check can fail.
 ok(/\bfetch\s*\(/.test('const x = await fetch(url)'), 'the fetch pattern matches a real fetch call');
 ok(!/\bfetch\s*\(/.test('// we never fetch anything\n'.replace(/^\s*\/\/.*$/gm, '')), 'a comment about fetching does not trip it');
+// And the extractor can fail: it finds a real import, and ignores one in prose.
+ok(
+  [...stripComments("import { x } from './neighbour.mjs';").matchAll(/\bfrom\s+'(\.\/[^']+)'/g)].length === 1,
+  'the import extractor finds a real local import',
+);
+ok(
+  [...stripComments("// never: from './probe.mjs'\n").matchAll(/\bfrom\s+'(\.\/[^']+)'/g)].length === 0,
+  'the import extractor ignores an import named in a comment',
+);
+// And the CLI stripper cuts in the right place: the guarded block goes, the
+// module body around it stays. A stripper that ate the whole file would make
+// every rail check above vacuously pass.
+{
+  const sample = "export const a = 1;\nif (import.meta.url === `file://${process.argv[1]}`) {\n  writeFileSync(x, y);\n}\n";
+  const stripped = stripCliMain(sample);
+  ok(!/writeFileSync/.test(stripped), 'the CLI stripper removes a guarded main block');
+  ok(/export const a = 1;/.test(stripped), 'the CLI stripper keeps the module body');
+  ok(stripCliMain('export const a = 1;\n') === 'export const a = 1;\n', 'the CLI stripper leaves a guardless module alone');
+}
+// The write check discriminates a call from a name in an import list.
+{
+  const w = /\b(writeFileSync|appendFileSync|rmSync|unlinkSync)\s*\(/;
+  ok(w.test('writeFileSync(path, body)'), 'the write pattern matches a real write call');
+  ok(!w.test("import { readFileSync, writeFileSync } from 'node:fs';"), 'an unused import is not a write');
+}
+
+// --- 11b. the profile and the policy the capture ACTUALLY ran ---------------
+// A coverage number without these is an instrument choice dressed as a fact
+// about the web: the residential baseline and the automated series differ on
+// the same 1,000 domains by thousands of doors, entirely because of what each
+// did when robots.txt could not be read.
+
+// Derived from the delta gate's own list, so a dimension added there appears
+// here without anyone remembering. Hand-listing the keys would let the
+// published profile silently describe a narrower gate than the one that runs.
+eq(
+  Object.keys(comparabilityProfile(MANIFEST)).join(','),
+  [...COMPARABILITY_DIMENSIONS].join(','),
+  'the comparability profile carries exactly the dimensions the delta gate uses',
+);
+eq(comparabilityProfile(MANIFEST)['vantage.class'], 'github-hosted-dynamic-egress', 'a recorded vantage reads through');
+eq(
+  comparabilityProfile(MANIFEST)['instrument_policy.robots_unavailable'],
+  'fail-closed-except-404-410',
+  'a recorded robots-unavailable policy reads through',
+);
+// This fixture's manifest predates the redirect dimension, exactly as the v1
+// baseline predates all of them.
+eq(
+  comparabilityProfile(MANIFEST)['instrument_policy.robots_redirects'],
+  UNRECORDED,
+  'a dimension the manifest predates reads `unrecorded`',
+);
+eq(comparabilityProfile({ capture_id: 'x' })['vantage.class'], UNRECORDED, 'a manifest with no vantage block reads `unrecorded`');
+
+// Four fixtures, one per observable policy. The site suite that shipped before
+// this change ran against two datasets that BOTH failed open, so every check
+// touching the not-attempted count was arithmetic on a zero and a mutant walked
+// out. A fixture family missing the class the code exists to describe cannot
+// test the code, so the control below refuses to pass if these collapse.
+const policyRows = (doors) =>
+  doors.map(([known, requested], i) => ({
+    ...base,
+    domain: `policy${i}.example`,
+    kind: 'request',
+    dialect: 'browser',
+    robots: { allowed: requested, reason: known ? 'no-matching-rule' : 'robots-policy-unknown-http-503', known },
+    requested,
+    outcome: requested ? 'reachable' : 'denied_by_robots',
+  }));
+const policyIndex = (doors, manifest = MANIFEST) =>
+  buildIndex({ manifest, rows: policyRows(doors), dialectClasses: DIALECT_TO_CLASS });
+
+const POLICY_CASES = {
+  'fail-open': [
+    [false, true],
+    [false, true],
+  ],
+  'fail-closed': [
+    [false, false],
+    [false, false],
+  ],
+  mixed: [
+    [false, true],
+    [false, false],
+  ],
+  'no-unreadable-robots-observed': [
+    [true, true],
+    [true, true],
+  ],
+};
+
+for (const [expected, doors] of Object.entries(POLICY_CASES)) {
+  const b = robotsUnavailableBehaviour(policyIndex(doors));
+  eq(b.observed_policy, expected, `a capture whose unreadable-robots doors are ${expected} is observed as ${expected}`);
+  eq(
+    b.probed_anyway + b.skipped,
+    b.doors_with_unreadable_robots,
+    `${expected}: the two halves account for every unreadable door`,
+  );
+}
+
+// Without this, all four cases could describe the same dataset and every
+// assertion above would still pass while testing one branch four times.
+eq(
+  new Set(Object.values(POLICY_CASES).map((d) => robotsUnavailableBehaviour(policyIndex(d)).observed_policy)).size,
+  Object.keys(POLICY_CASES).length,
+  'the four policy fixtures are actually distinguishable',
+);
+
+// Observed comes from the bytes; declared comes from the manifest. A manifest
+// that says the opposite of what the rows did must not be able to overwrite
+// them - that is the whole reason both are published.
+const LYING = policyIndex(POLICY_CASES['fail-closed'], {
+  ...MANIFEST,
+  instrument_policy: { robots_unavailable: 'fail-open' },
+});
+eq(robotsUnavailableBehaviour(LYING).declared_policy, 'fail-open', 'the declared policy is reported verbatim');
+eq(
+  robotsUnavailableBehaviour(LYING).observed_policy,
+  'fail-closed',
+  'the observed policy comes from the rows regardless of what the manifest declares',
+);
+
+{
+  const b = robotsUnavailableBehaviour(INDEX);
+  const note = datasetStatus(INDEX, { now: NOW_FRESH }).note;
+  ok(note.includes(`\`${b.observed_policy}\``), 'the status note states the policy the capture was observed to run');
+  ok(note.includes(`\`${b.declared_policy}\``), 'the status note states the policy the manifest declares');
+  // The sentence this replaced ended "and this instrument fails closed" - true
+  // of the automated series, false of the baseline the site serves, and shipped
+  // to a calling model either way.
+  ok(!/this instrument fails closed/.test(note), 'the status note reads a policy rather than asserting one');
+}
 
 // --- 12. against the real published capture, when one is beside us ----------
 // Fixtures prove the rules; the published bytes prove the rules survive contact

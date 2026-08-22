@@ -21,17 +21,21 @@ import { aggregate } from './aggregate.mjs';
 import { SITE_FILES } from './dialects.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
 import {
+  CAPTURE_SELECTION,
+  CURRENCY_CLAIMS,
   DIMENSION_WORDS,
   SITE_ORIGIN,
   TOOL_WORDS,
   VOLATILE_ARTIFACT_KEYS,
   assertNoVolatileClaim,
+  assertNoCurrencyClaim,
   buildSite,
   comparabilityPhrase,
   loadVerifiedCapture,
   toolSpecs,
+  vantageNote,
 } from './build-site.mjs';
-import { COMPARABILITY_DIMENSIONS } from './policy.mjs';
+import { COMPARABILITY_DIMENSIONS, INSTRUMENT_POLICY, UNRECORDED } from './policy.mjs';
 import { PRESENT_TENSE_FIELD_NAMES, buildIndex, datasetStatus } from './lookup.mjs';
 import { DIALECT_TO_CLASS } from './reports.mjs';
 import { SERVER_NAME, TOOLS } from './mcp-server.mjs';
@@ -81,7 +85,7 @@ const throws = (fn, re, msg) => {
  * majority of the dataset and is the whole subject of #17. A fixture that omits
  * the evidence class the page exists to explain cannot test the page.
  */
-function makeFixture(dir, { domains = 40, vendorDenials = 30, browserDenials = 4, unreadableEvery = 9 } = {}) {
+function makeFixture(dir, { domains = 40, vendorDenials = 30, browserDenials = 4, unreadableEvery = 9, profile = null, name = 'fixture' } = {}) {
   const rows = [];
   // robots.txt came back unreadable: our policy fails closed, so no request is
   // sent to ANY caller — a fact about this instrument, carrying no information
@@ -141,21 +145,29 @@ function makeFixture(dir, { domains = 40, vendorDenials = 30, browserDenials = 4
     }
   }
   const body = rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
-  const capture = join(dir, 'fixture.jsonl');
+  const capture = join(dir, `${name}.jsonl`);
   writeFileSync(capture, body);
   const agg = aggregate(rows);
-  const manifest = join(dir, 'fixture.manifest.json');
+  const manifest = join(dir, `${name}.manifest.json`);
   writeFileSync(
     manifest,
     JSON.stringify({
       schema_version: 1,
-      capture_id: 'fixture-capture',
+      capture_id: `${name}-capture`,
       capture_class: 'fixture',
+      // Off by default, so the default fixture reproduces the v1 baseline's
+      // shape: a manifest that predates the whole comparability block and
+      // therefore reports `unrecorded` on every dimension. With ONLY that
+      // fixture, the derived-provenance path would never once be exercised
+      // against a manifest that actually records something, and the branch
+      // that renders a real vantage would be held by nothing. That is the
+      // escape shape this repository has now recorded several times.
+      ...(profile ?? {}),
       observed_from: '2026-08-22T00:00:00.000Z',
       observed_through: '2026-08-22T00:10:00.000Z',
       input: { name: 'fixture-list.csv', tranco_list: 'FIXTURE' },
       dataset: {
-        name: 'fixture.jsonl',
+        name: `${name}.jsonl`,
         sha256: createHash('sha256').update(readFileSync(capture)).digest('hex'),
         bytes: Buffer.byteLength(body),
         rows: rows.length,
@@ -457,12 +469,212 @@ function runSuite(label, capture, manifest) {
     }
     file('404.html');
   });
+
+  // --- #24: every count is printed beside the capture that produced it -------
+
+  t('no built file describes its capture in the present tense', () => {
+    for (const [rel, body] of built.files) {
+      const lower = String(body).toLowerCase();
+      const found = CURRENCY_CLAIMS.filter((phrase) => lower.includes(phrase));
+      eq(found.join(','), '', `${rel} calls a pinned capture ${found.join(', ')}`);
+    }
+  });
+
+  t('the coverage claim names the capture it is about', () => {
+    const mcp = file('mcp.html');
+    const id = built.summary.capture_id;
+    ok(
+      new RegExp(`Of \\d+ domains in capture <code>${id.replace(/[.*+?^$()|[\]\\]/g, '\\$&')}</code>`).test(mcp),
+      'the /mcp coverage sentence does not name its capture',
+    );
+    ok(mcp.includes(built.summary.capture_class), '/mcp does not state the capture class');
+  });
+
+  t('the machine descriptor says which capture it describes and that the surface is pinned', () => {
+    const d = JSON.parse(file('api/mcp.json'));
+    eq(d.dataset.capture_id, built.summary.capture_id, 'descriptor capture id');
+    eq(d.dataset.capture_class, built.summary.capture_class, 'descriptor capture class');
+    eq(d.dataset.selection.mode, CAPTURE_SELECTION.mode, 'descriptor selection mode');
+    ok(d.dataset.comparability_profile, 'descriptor carries no comparability profile');
+    ok(d.dataset.robots_unavailable_behaviour, 'descriptor carries no observed robots policy');
+  });
+
+  t('the published profile carries every dimension the delta gate checks', () => {
+    const d = JSON.parse(file('api/mcp.json'));
+    eq(
+      Object.keys(d.dataset.comparability_profile).join(','),
+      [...COMPARABILITY_DIMENSIONS].join(','),
+      'published profile keys',
+    );
+    // And the human page renders the same set, so the two surfaces cannot
+    // disagree about what comparability means.
+    for (const path of COMPARABILITY_DIMENSIONS) {
+      ok(index.includes(`<code>${path}</code>`), `the index profile table omits ${path}`);
+    }
+  });
+
+  t('the instrument sentence is READ from this capture, not written about another one', () => {
+    const summary = JSON.parse(file('api/summary.json'));
+    // The literal it replaced. It named a residential vantage and a fail-open
+    // policy, and it was emitted for whatever capture the build was pointed at.
+    ok(
+      !/This capture was taken from a residential vantage/.test(summary.limitations.vantage_note),
+      'the vantage note is a literal again',
+    );
+    eq(summary.limitations.vantage_note, vantageNote(summary.comparability_profile), 'the note is derived from the profile');
+    // The four dimensions the sentence spells out, checked by VALUE. A note
+    // built from the profile object but printing none of its values would
+    // satisfy the equality above and tell a reader nothing.
+    for (const path of NOTE_DIMENSIONS) {
+      const value = String(summary.comparability_profile[path]);
+      ok(summary.limitations.vantage_note.includes(`\`${value}\``), `the instrument sentence omits ${path} = ${value}`);
+    }
+  });
+
+  t('the page names no robots-unavailable policy it did not measure or declare', () => {
+    // The `not-attempted` table cell used to read "We could not read robots.txt
+    // and failed closed" — true of the automated series, false of the baseline
+    // this page serves, and invisible to the currency guard because it is not a
+    // currency word. A phrase blocklist would be the ninth list covering what
+    // its author thought of, so the rule is positive instead: any policy NAMED
+    // on this page must be one this capture was observed to run, one its
+    // manifest declares, or the instrument's own declared policy. Anything else
+    // is prose about somebody else's capture.
+    const b = built.summary.robots_unavailable_behaviour ?? JSON.parse(file('api/mcp.json')).dataset.robots_unavailable_behaviour;
+    const allowed = new Set([b.observed_policy, String(b.declared_policy), INSTRUMENT_POLICY.robots_unavailable]);
+    const named = [...file('mcp.html').matchAll(/fail(?:ed|s)?[- ](?:open|closed)[a-z0-9-]*/gi)].map((m) => m[0]);
+    for (const token of named) {
+      ok(allowed.has(token), `/mcp names policy "${token}", which this capture neither ran nor declares`);
+    }
+    // Vacuity control: the scan finds a policy token when one is present.
+    ok(
+      [...'we failed closed here'.matchAll(/fail(?:ed|s)?[- ](?:open|closed)[a-z0-9-]*/gi)].length === 1,
+      'the policy-token scan matches nothing at all',
+    );
+  });
+
+  t('the observed robots policy is computed from these rows, not read from the manifest', () => {
+    const d = JSON.parse(file('api/mcp.json'));
+    const b = d.dataset.robots_unavailable_behaviour;
+    const unreadable = rows.filter((r) => r.kind === 'request' && r.robots?.known !== true);
+    eq(b.doors_with_unreadable_robots, unreadable.length, 'unreadable-robots door count');
+    eq(b.probed_anyway, unreadable.filter((r) => r.requested === true).length, 'doors probed on unreadable robots');
+    eq(b.skipped, unreadable.filter((r) => r.requested !== true).length, 'doors skipped on unreadable robots');
+  });
 }
+
+// The dimensions the instrument sentence spells out in prose. It names four of
+// the nine on purpose: the full set is rendered as a table on the index page,
+// and a sentence listing nine dotted paths is a table with worse typography.
+const NOTE_DIMENSIONS = [
+  'vantage.class',
+  'instrument_policy.robots_unavailable',
+  'instrument_policy.robots_redirects',
+  'observation_window.slot',
+];
 
 const dir = mkdtempSync(join(tmpdir(), 'canireach-fixture-'));
 try {
   const fx = makeFixture(dir);
   runSuite('fixture', fx.capture, fx.manifest);
+
+  // The SAME suite over a capture whose manifest actually records its profile.
+  // The default fixture and the published v1 baseline both predate the
+  // comparability block, so with only those two every derived value on every
+  // surface renders `unrecorded` — and the branch that prints a real vantage,
+  // a real policy and a real slot would be held by nothing at all while sixty
+  // checks reported green. This repository has shipped that shape enough times
+  // to stop trusting a fixture family that agrees with itself.
+  const recorded = makeFixture(dir, {
+    name: 'recorded',
+    profile: {
+      vantage: { id: 'github-actions-ubuntu-dynamic', class: 'github-hosted-dynamic-egress' },
+      observation_window: { slot: '04:17[America/Chicago]', nominal: '04:17', observed_local: '04:19', drift_minutes: 2 },
+      instrument_policy: INSTRUMENT_POLICY,
+    },
+  });
+  runSuite('fixture with a recorded profile', recorded.capture, recorded.manifest);
+
+  check('[control] a recorded profile renders differently from an unrecorded one', () => {
+    const bare = buildSite({ capture: fx.capture, manifest: fx.manifest });
+    const full = buildSite({ capture: recorded.capture, manifest: recorded.manifest });
+    const bareNote = bare.summary.limitations.vantage_note;
+    const fullNote = full.summary.limitations.vantage_note;
+    ok(bareNote !== fullNote, 'the instrument sentence is identical either way; it is not reading the manifest');
+    // And in the direction that matters: the bare one says `unrecorded` and the
+    // recorded one says what the instrument actually declared.
+    // Per DIMENSION, not per note: the note's closing sentence explains what
+    // `unrecorded` means, so it contains that word in both renderings and a
+    // whole-string search for it proves nothing. This control asserted exactly
+    // that and failed on its own wording rather than on the code.
+    for (const path of NOTE_DIMENSIONS) {
+      eq(bare.summary.comparability_profile[path], UNRECORDED, `the bare fixture records ${path}`);
+      ok(bareNote.includes(`\`${UNRECORDED}\``), `the bare note does not render ${path} as unrecorded`);
+      const value = String(full.summary.comparability_profile[path]);
+      ok(value !== UNRECORDED, `the recorded fixture failed to record ${path}`);
+      ok(fullNote.includes(`\`${value}\``), `the recorded note omits ${path} = ${value}`);
+    }
+    eq(
+      bare.summary.comparability_profile['vantage.class'],
+      UNRECORDED,
+      'the unrecorded fixture reports a vantage it does not have',
+    );
+    eq(
+      full.summary.comparability_profile['vantage.class'],
+      'github-hosted-dynamic-egress',
+      'the recorded fixture loses its vantage',
+    );
+  });
+
+  check('[control] the currency guard can fail, and fails at build exit code 3', () => {
+    for (const phrase of CURRENCY_CLAIMS) {
+      let threw = null;
+      try {
+        assertNoCurrencyClaim(`figures for ${phrase} are below`, 'probe');
+      } catch (err) {
+        threw = err;
+      }
+      ok(threw !== null, `the guard accepts the phrase "${phrase}"`);
+      eq(threw?.exitCode, 3, `the guard refuses "${phrase}" with the build's refusal code`);
+    }
+    // And it is not simply refusing everything: the real built pages pass it,
+    // which is asserted per-file in the suite above, and neutral prose passes.
+    assertNoCurrencyClaim('Of 1000 domains in capture 2026-08-22T0815Z, 974 carry evidence.', 'probe');
+    assertNoCurrencyClaim('', 'probe');
+    // Case-folded, because the phrase that rots is as likely to open a sentence
+    // as to sit inside one. A mutant deleting the fold walked out of this suite.
+    let capitalised = null;
+    try {
+      assertNoCurrencyClaim('The Current Capture is described below', 'probe');
+    } catch (err) {
+      capitalised = err;
+    }
+    ok(capitalised !== null, 'the guard reads past a capitalised currency claim');
+  });
+
+  check('[control] the guard is WIRED INTO the build, not merely exported', () => {
+    // Asserting the built pages are clean does not assert that anything would
+    // stop them being dirty: the pages are clean because the copy is clean. A
+    // mutant deleting the guard from buildSite() left every page-content check
+    // green. So the phrase is injected through a value the pages actually
+    // render — the capture id — and the BUILD must refuse.
+    const rotten = makeFixture(dir, { name: 'rotten' });
+    const m = JSON.parse(readFileSync(rotten.manifest, 'utf8'));
+    m.capture_id = 'currently-rotten';
+    const path = join(dir, 'rotten-id.manifest.json');
+    writeFileSync(path, JSON.stringify(m));
+    let threw = null;
+    try {
+      buildSite({ capture: rotten.capture, manifest: path });
+    } catch (err) {
+      threw = err;
+    }
+    ok(threw !== null, 'the build published a page containing a currency claim');
+    eq(threw?.exitCode, 3, 'the build refused with the wrong code');
+    // Control: the same fixture with an ordinary capture id builds fine, so the
+    // refusal above is about the phrase and not about the fixture.
+    buildSite({ capture: rotten.capture, manifest: rotten.manifest });
+  });
 
   // Vacuity control: the same suite over data where the page's central claim is
   // false must FAIL. Without this, "the finding matches the data" could be a

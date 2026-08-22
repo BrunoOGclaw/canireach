@@ -159,6 +159,40 @@ const LOOKUP = [
     '.sort((a, b) => a.dialect.localeCompare(b.dialect));',
     ';',
   ],
+
+  // --- #24: the capture's profile, and the policy it actually ran ---------
+  [
+    'the profile is hand-listed rather than derived from the delta gate',
+    '  for (const path of COMPARABILITY_DIMENSIONS) profile[path] = dimensionValue(manifest, path);',
+    "  for (const path of ['vantage.class', 'input.sha256']) profile[path] = dimensionValue(manifest, path);",
+  ],
+  [
+    'a dimension the manifest predates is smoothed into a blank instead of `unrecorded`',
+    '  for (const path of COMPARABILITY_DIMENSIONS) profile[path] = dimensionValue(manifest, path);',
+    "  for (const path of COMPARABILITY_DIMENSIONS) profile[path] = manifest?.[path] ?? '';",
+  ],
+
+  // --- the observed policy comes from the rows, or it is the manifest twice --
+  [
+    'the observed robots policy is read from the manifest instead of the rows',
+    '      if (row.robots?.known === true) continue;',
+    '      if (true) continue;',
+  ],
+  [
+    'a door probed on an unreadable robots.txt is counted as skipped',
+    '      if (row.requested === true) probedAnyway++;',
+    '      if (row.requested !== true) probedAnyway++;',
+  ],
+  [
+    'fail-open and fail-closed become indistinguishable',
+    "        : skipped === 0\n          ? 'fail-open'",
+    "        : skipped >= 0\n          ? 'fail-open'",
+  ],
+  [
+    'a capture with no unreadable robots is reported as fail-closed',
+    "        ? 'no-unreadable-robots-observed'",
+    "        ? 'fail-closed'",
+  ],
 ];
 
 const MCP = [

@@ -55,6 +55,7 @@
 
 import { PROBE_MATCH_MAX_LAG_MINUTES } from './reports.mjs';
 import { SITE_FILES } from './dialects.mjs';
+import { COMPARABILITY_DIMENSIONS, dimensionValue } from './policy.mjs';
 
 /** Doors we did knock on, doors we did not, and why not. */
 export const EVIDENCE_KINDS = [
@@ -366,12 +367,93 @@ export function crowdBlock(index, domain) {
 }
 
 /**
+ * The comparability profile of the loaded capture, read from its manifest.
+ *
+ * The KEYS are `COMPARABILITY_DIMENSIONS` verbatim — the same list tools/
+ * compare.mjs gates a delta on — so this block is, exactly, "what would have to
+ * match before a number here could be differenced against another capture".
+ * Deriving the key set means a dimension added to the gate appears here without
+ * anyone remembering to add it, and a dimension the manifest predates reports
+ * `unrecorded` rather than vanishing.
+ *
+ * It exists because the answer to "how much of this dataset is evidence" is
+ * meaningless without it: the residential baseline and the automated series
+ * differ on that split by thousands of doors, and the difference is entirely
+ * instrument. A reader handed the number without the profile reads an
+ * instrument choice as a fact about the web.
+ */
+export function comparabilityProfile(manifest) {
+  const profile = {};
+  for (const path of COMPARABILITY_DIMENSIONS) profile[path] = dimensionValue(manifest, path);
+  return profile;
+}
+
+/**
+ * What this capture ACTUALLY did when robots.txt could not be read, measured
+ * from its own rows.
+ *
+ * The manifest DECLARES a robots-unavailable policy, and the v1 baseline's
+ * manifest predates the block entirely, so it declares `unrecorded`. That left
+ * the single most consequential property of the dataset unstated on a surface
+ * built from it — while the bytes knew the answer the whole time. Every door
+ * whose `robots.known` is false either had a request sent to it or did not, and
+ * that is the policy, observed rather than asserted.
+ *
+ * It matters because it is the entire 974-vs-195 gap between this baseline and
+ * the automated series: 2,125 of the baseline's 5,000 doors were probed on an
+ * unreadable robots.txt and would be `not-attempted` under a fail-closed
+ * instrument. A reader given the coverage number without this one is being
+ * handed an instrument choice dressed as a fact about the web.
+ *
+ * Published BESIDE the declared policy, never checked against it. The declared
+ * strings carry exceptions (`fail-closed-except-404-410` is consistent with
+ * doors probed anyway, doors skipped, or both), so a mechanical contradiction
+ * test would need a policy interpreter, and an interpreter that misread the
+ * exception would refuse a good nightly capture. A gate that can break the
+ * capture path is worse than two numbers a reader can compare.
+ */
+export function robotsUnavailableBehaviour(index) {
+  let unreadable = 0;
+  let probedAnyway = 0;
+  for (const entry of index.byDomain.values()) {
+    for (const row of entry.requests) {
+      if (row.robots?.known === true) continue;
+      unreadable++;
+      if (row.requested === true) probedAnyway++;
+    }
+  }
+  const skipped = unreadable - probedAnyway;
+  return {
+    doors_with_unreadable_robots: unreadable,
+    probed_anyway: probedAnyway,
+    skipped: skipped,
+    observed_policy:
+      unreadable === 0
+        ? 'no-unreadable-robots-observed'
+        : skipped === 0
+          ? 'fail-open'
+          : probedAnyway === 0
+            ? 'fail-closed'
+            : 'mixed',
+    declared_policy: dimensionValue(index.manifest, 'instrument_policy.robots_unavailable'),
+  };
+}
+
+/**
  * What the caller needs before trusting any answer above: which capture is
  * loaded, how old it is, and how much of it is actually behavioural evidence.
  *
  * The coverage numbers are the honest headline of the whole dataset, and they
  * are derived from the indexed rows rather than read from a manifest field, so
  * they cannot drift from what the lookups above will actually say.
+ *
+ * `note` READS the capture's declared robots-unavailable policy instead of
+ * asserting one. It used to end "...and this instrument fails closed", which
+ * was true of the automated series and FALSE of the residential baseline the
+ * site serves — a statement about the instrument, shipped to a calling model,
+ * that was wrong for the capture actually loaded. The count beside it is the
+ * measured consequence of whatever policy ran, which is the part no manifest
+ * can get wrong.
  */
 export function datasetStatus(index, { now }) {
   if (!now) throw new Error('datasetStatus() requires an explicit `now`');
@@ -387,12 +469,23 @@ export function datasetStatus(index, { now }) {
     }
     if (any) domainsWithBehaviour++;
   }
+  const doors = Object.values(coverage).reduce((a, b) => a + b, 0);
+  const robots = robotsUnavailableBehaviour(index);
   return {
     as_of: provenance(index, now),
     domains_indexed: index.byDomain.size,
     domains_with_any_behavioural_evidence: domainsWithBehaviour,
     doors_by_evidence: coverage,
+    comparability_profile: comparabilityProfile(index.manifest),
+    robots_unavailable_behaviour: robots,
     crowd_resolved_at: index.resolved_at,
-    note: 'Doors counted as `not-attempted` were skipped because robots.txt was unreadable and this instrument fails closed. They are evidence about the instrument, not about the hosts.',
+    note:
+      'Doors counted as `not-attempted` had no request sent, because robots.txt could not be read as policy. ' +
+      `In this capture ${coverage['not-attempted']} of ${doors} doors are in that class. ` +
+      `robots.txt could not be read at ${robots.doors_with_unreadable_robots} doors in total; ` +
+      `${robots.probed_anyway} were probed anyway and ${robots.skipped} were skipped, so this capture behaved as ` +
+      `\`${robots.observed_policy}\` and declares \`${robots.declared_policy}\`. Those doors are evidence about the ` +
+      'instrument, not about the hosts: under the opposite policy they change class wholesale without a single site ' +
+      'having changed its mind, which is why coverage is only meaningful beside the profile that produced it.',
   };
 }
