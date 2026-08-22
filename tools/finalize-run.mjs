@@ -272,7 +272,11 @@ export function validateRun(file, { run, list, vantage, allowPartial = false, li
   };
 }
 
-function sidecars(file, run) {
+// Exported so the public surface can DERIVE the manifest filename it tells a
+// reader to run the MCP server against, rather than restating the rule. An
+// `export` keyword and nothing else: this module is on the nightly capture path
+// and a throw at 04:17 loses the night unrecoverably.
+export function sidecars(file, run) {
   return {
     manifest: join(dirname(file), `${run}.manifest.json`),
     checksum: join(dirname(file), `${run}.sha256`),

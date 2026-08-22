@@ -39,10 +39,54 @@ const MUTANTS = [
   ],
   ['the descriptor states a protocol version of its own', "      protocol_version: PROTOCOL_VERSION,", "      protocol_version: '2024-11-05',"],
   ['the descriptor states a server version of its own', '      version: SERVER_VERSION,', "      version: '9.9.9',"],
+  // --- #27: the published command has to be one that actually runs ----------
+  // The defect these exist for shipped green through a check whose own title
+  // was "the invocation the site publishes is the one the server accepts": it
+  // asserted --manifest was present and never looked at the filename beside it.
   [
     'the descriptor publishes an invocation the server would reject',
-    "      args: ['tools/mcp-server.mjs', '--manifest', '<capture>.final.manifest.json'],",
-    "      args: ['tools/mcp-server.mjs', '--capture', '<capture>.jsonl'],",
+    "      args: ['tools/mcp-server.mjs', MANIFEST_FLAG, served],",
+    "      args: ['tools/mcp-server.mjs', '--capture', served],",
+  ],
+  [
+    'the manifest name goes back to the literal that shipped',
+    '  const served = basename(String(manifestPath));',
+    "  const served = '<capture>.final.manifest.json';",
+  ],
+  [
+    'the manifest name is a plausible literal rather than the capture rendered',
+    '  const served = basename(String(manifestPath));',
+    "  const served = 'baseline.manifest.json';",
+  ],
+  [
+    'the placeholder refusal never fires',
+    '  const placeholder = args.find((a) => /[<>]/.test(String(a)));',
+    '  const placeholder = undefined;',
+  ],
+  [
+    'the build stops checking that the argv names the capture it rendered',
+    '  if (named !== expectedManifest) {',
+    '  if (false) {',
+  ],
+  [
+    'the manifest argument is found by position instead of by its flag',
+    '  const at = invocation.args.indexOf(MANIFEST_FLAG);\n  return at < 0 ? null : invocation.args[at + 1];',
+    '  return invocation.args[invocation.args.length - 1];',
+  ],
+  [
+    'the refusal is exported but not wired into the derivation',
+    '  return assertRunnableInvocation(\n    {',
+    '  return ((invocation) => invocation)(\n    {',
+  ],
+  [
+    'the naming convention is restated instead of read from the writer',
+    "  const naming = basename(sidecars('probes/capture.jsonl', '<capture-id>').manifest);",
+    "  const naming = '<capture-id>.final.manifest.json';",
+  ],
+  [
+    'the run-it block stops printing the derived argv',
+    '${esc(invocation.command)} ${invocation.args.map((a) => esc(a)).join(\' \')}',
+    'node tools/mcp-server.mjs --manifest &lt;capture&gt;.final.manifest.json',
   ],
 
   // --- the coverage split is the dataset's most important disclosure --------

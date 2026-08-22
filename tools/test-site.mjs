@@ -16,8 +16,9 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { aggregate } from './aggregate.mjs';
+import { sidecars } from './finalize-run.mjs';
 import { SITE_FILES } from './dialects.mjs';
 import { DIALECTS, PROBE_CONTACT } from './dialects.mjs';
 import {
@@ -29,8 +30,10 @@ import {
   VOLATILE_ARTIFACT_KEYS,
   assertNoVolatileClaim,
   assertNoCurrencyClaim,
+  assertRunnableInvocation,
   buildSite,
   comparabilityPhrase,
+  invocationFor,
   loadVerifiedCapture,
   toolSpecs,
   vantageNote,
@@ -676,6 +679,30 @@ try {
     buildSite({ capture: rotten.capture, manifest: rotten.manifest });
   });
 
+  // #27, same argument one field over: the runnable-invocation refusal is only
+  // worth having if buildSite CALLS it. It cannot fire on ordinary input, since
+  // the served name is derived — so the fault is injected the only way it can
+  // reach the argv, through the manifest path's own basename, and the BUILD must
+  // refuse. Without this, deleting the call left every check green: the argv is
+  // runnable because the derivation is right, not because anything checked.
+  check('[control] the runnable-invocation refusal is WIRED INTO the build', () => {
+    const odd = makeFixture(dir, { name: 'odd' });
+    const path = join(dir, '<capture>.manifest.json');
+    writeFileSync(path, readFileSync(odd.manifest));
+    let threw = null;
+    try {
+      buildSite({ capture: odd.capture, manifest: path });
+    } catch (err) {
+      threw = err;
+    }
+    ok(threw !== null, 'the build published an argv containing an unexpanded placeholder');
+    eq(threw?.exitCode, 3, 'the build refused with the wrong code');
+    ok(/placeholder/.test(String(threw?.message)), `refused for the wrong reason: ${threw?.message}`);
+    // Control: the identical fixture under an ordinary filename builds, so the
+    // refusal is about the name reaching the argv and not about the fixture.
+    buildSite({ capture: odd.capture, manifest: odd.manifest });
+  });
+
   // Vacuity control: the same suite over data where the page's central claim is
   // false must FAIL. Without this, "the finding matches the data" could be a
   // check that passes on anything.
@@ -742,6 +769,39 @@ try {
     throws(() => toolSpecs(TOOLS, hijack), /would override what the server publishes/, 'build accepted overriding copy');
   });
 
+  // #27: the build must REFUSE a command that would not run, not merely have a
+  // test that would notice. Every one of these was writable before this card.
+  check('the build refuses an invocation that would not run', () => {
+    const good = { command: 'node', args: ['tools/mcp-server.mjs', '--manifest', 'x.manifest.json'] };
+    assertRunnableInvocation(good, 'x.manifest.json');
+    throws(
+      () => assertRunnableInvocation({ ...good, args: ['tools/mcp-server.mjs', '--manifest', '<capture>.final.manifest.json'] }, 'x.manifest.json'),
+      /placeholder, not a path a reader can run/,
+      'build accepted an unexpanded placeholder as a runnable path',
+    );
+    throws(
+      () => assertRunnableInvocation({ ...good, args: ['tools/mcp-server.mjs', '--manifest', 'other.manifest.json'] }, 'x.manifest.json'),
+      /but this surface was built from/,
+      'build accepted an invocation naming a capture it did not render',
+    );
+    throws(
+      () => assertRunnableInvocation({ ...good, args: ['tools/mcp-server.mjs', '--capture', 'x.jsonl'] }, 'x.manifest.json'),
+      /omit --manifest/,
+      'build accepted an invocation missing the flag the server requires',
+    );
+  });
+
+  // The general naming rule the /mcp page states is checked against the WRITER
+  // that produces it, not against a second copy of the rule. Change how
+  // finalize-run.mjs names a sidecar and this expectation changes with it —
+  // which is the whole difference between a derivation and a restatement.
+  check('the published manifest-naming convention comes from the writer that names them', () => {
+    const inv = invocationFor('probes/2026-01-01T0000Z.manifest.json', { repository: 'r', releases: 'c' });
+    eq(inv.manifest_naming, basename(sidecars('probes/x.jsonl', '<capture-id>').manifest), 'published naming rule');
+    eq(inv.args[inv.args.indexOf('--manifest') + 1], '2026-01-01T0000Z.manifest.json', 'served manifest name');
+    ok(inv.note.includes(inv.manifest_naming), 'the note states a convention the descriptor does not publish');
+  });
+
   // THE DESCRIPTOR IS CHECKED AGAINST A RUNNING SERVER, NOT AGAINST THE MODULE
   // IT IMPORTS. Comparing the published tools to the constant the publisher read
   // would be a tautology. Driving a real child over a real pipe puts the whole
@@ -796,6 +856,62 @@ try {
       eq(inv.command, 'node', 'published command');
       ok(inv.args.includes('--manifest'), 'published invocation omits the flag the server requires');
       ok(inv.args.some((a) => a.endsWith('mcp-server.mjs')), 'published invocation does not name the server script');
+    });
+
+    // THE CHECK ABOVE IS THE ONE THAT SHIPPED THE DEFECT ON #27, AND ITS TITLE
+    // ALREADY CLAIMED WHAT THIS ONE ACTUALLY DOES. It asserted the flag was
+    // present and never looked at the filename beside it, so
+    // `<capture>.final.manifest.json` — an asset name belonging to exactly one
+    // release — went out on /api/mcp.json as the invocation for every capture,
+    // and ENOENTed for anyone who followed the note telling them to download
+    // any of them. Validating an argv is not running it. So this one RUNS it.
+    const publishedArgv = (inv, manifestPath) => {
+      const at = inv.args.indexOf('--manifest');
+      return inv.args.map((a, i) =>
+        i === at + 1 ? join(dirname(manifestPath), a) : a.endsWith('mcp-server.mjs') ? server : a,
+      );
+    };
+    const runArgv = (argv) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
+        let err = '';
+        child.stderr.on('data', (d) => (err += d));
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ code, err }));
+        child.stdin.end();
+      });
+
+    // A MUTANT ESCAPED HERE AND IT WAS THE HALF A PERSON READS. Everything
+    // above proves /api/mcp.json is runnable; the /mcp page's own code block was
+    // held by nothing, so it could go back to printing the rotted command while
+    // the descriptor stayed correct — the identical defect, aimed at the human.
+    // The page must print the published argv and no other invocation.
+    check('the run-it block prints exactly the invocation the descriptor publishes', () => {
+      const html = built.files.get('mcp.html');
+      const shown = [...html.matchAll(/node tools\/mcp-server\.mjs --manifest ([^\s<]+)/g)].map((m) => m[1]);
+      const published = descriptor.invocation.args[descriptor.invocation.args.indexOf('--manifest') + 1];
+      eq(JSON.stringify(shown), JSON.stringify([published]), 'the page and the descriptor publish different commands');
+    });
+
+    const ran = await runArgv(publishedArgv(descriptor.invocation, fx.manifest));
+    check('[live] the published argv actually starts a server, run rather than validated', () => {
+      eq(ran.code, 0, `published invocation exited non-zero: ${ran.err.slice(0, 200)}`);
+      ok(ran.err.includes(SERVER_NAME), `published invocation did not bring up a server: ${ran.err.slice(0, 200)}`);
+    });
+
+    // NEGATIVE CONTROL. Without it the check above passes for any argv that
+    // happens to work, including one this build could not have produced — and a
+    // positive-only spawn is exactly the vacuity this repository keeps finding.
+    // This is the literal string that shipped, against a capture that is not the
+    // one release carrying it.
+    const rotted = {
+      ...descriptor.invocation,
+      args: descriptor.invocation.args.map((a) => (a.endsWith('.manifest.json') ? '<capture>.final.manifest.json' : a)),
+    };
+    const rottedRun = await runArgv(publishedArgv(rotted, fx.manifest));
+    check('[live] control: the filename that shipped on #27 does NOT start a server', () => {
+      ok(rottedRun.code !== 0, 'a manifest name no capture has still started a server; the check above proves nothing');
+      ok(rottedRun.err.includes('refusing to serve'), `unexpected failure mode: ${rottedRun.err.slice(0, 200)}`);
     });
   })();
 
