@@ -208,6 +208,46 @@ the strongest is how a dataset manufactures its own launch.
 - There is **no ingest endpoint yet**, and no unauthenticated public write
   surface is authorised. This is the schema and the state machine only.
 
+## Answering an agent: what a lookup may and may not say
+
+`tools/lookup.mjs` derives every answer from a capture whose bytes hashed to the
+SHA-256 its manifest published, plus crowd claims already promoted by the state
+machine above. No hand-maintained table is consulted, and the tool never probes
+on demand: a reachability service that fetched on request would be an
+on-request scanner pointed at whatever third party the caller named.
+
+**Every door is classified by what we actually did**, not by the row's outcome
+string. A request row carries `outcome: denied_by_robots` in two situations that
+mean opposite things, and the row's `robots.known` flag separates them:
+
+| Evidence | What happened | What it says about the host |
+| --- | --- | --- |
+| `behaviour` | Request sent, response observed | The site's actual behaviour toward that identity |
+| `robots-declaration` | robots.txt read; it disallows this token | The site's declaration. We obeyed it and never asked, so it is not behaviour |
+| `not-attempted` | robots.txt unreadable; this instrument fails closed | **Nothing.** It is a fact about the instrument |
+
+`last_outcome` is non-null only for `behaviour`. Reporting a denial as an
+outcome would present our own compliance, and our own fail-closed default, as
+the site's answer. On the 2026-08-22T162332Z capture the split is 945
+`behaviour`, 100 `robots-declaration`, 3,955 `not-attempted` — so a tool that
+collapsed the three would overstate refusals by roughly forty to one.
+
+The same distinction applies one layer over, to the detour: an affordance file
+that was never fetched because the robots gate closed is reported `unknown`,
+never `absent`.
+
+**Age is part of the answer, not a footnote.** Captures are one instant per
+night and reachability is not hour-invariant, which is why the observation hour
+is a comparability dimension. Every answer carries its capture id, observation
+slot, vantage class, `observed_at`, `age_minutes`, and a `freshness` verdict
+against `PROBE_MATCH_MAX_LAG_MINUTES` — the same 180-minute bound used to decide
+whether an owned probe may corroborate a crowd report, imported rather than
+restated. No field in an answer is present-tense: there is no `reachable`, no
+`blocked`, no `allowed`, and a guard on the rendered answer refuses one.
+
+A host that has never been probed answers `unknown`. There is no parent-domain
+fallback and no inference from neighbouring hosts.
+
 ## Input provenance
 
 `data/domains/tranco-74V8X-1000.csv` contains ranks 1-1000 from Tranco list
@@ -225,3 +265,12 @@ the list is a sampling frame, not a claim about exact global popularity.
 - A 200 response can be a soft 404. Agent-affordance files apply a conservative
   HTML-shell check, but cannot prove semantic validity.
 - Vendor-token simulations are not vendor-authenticated traffic.
+- **Most of a capture is not behavioural evidence.** On 2026-08-22T162332Z only
+  195 of 1,000 domains carry any. 452 domains redirect `robots.txt` and this
+  instrument records redirects without following them, so the fail-closed policy
+  stops those doors before a request is sent. RFC 9309 §2.3.1.2 states that
+  crawlers SHOULD follow at least five consecutive redirects for robots.txt,
+  even across authorities, so this is a conformance gap. The redirect policy is
+  correct for the probe target — a destination path needs its own robots verdict
+  — and wrong for robots.txt itself. Changing it moves a declared comparability
+  dimension, so it is tracked as a card rather than patched silently.

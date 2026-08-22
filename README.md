@@ -48,6 +48,49 @@ when that local date already has an immutable release. GitHub-hosted measurement
 are labelled `github-actions-ubuntu-dynamic`: their egress IP and location can
 vary, so they must not be described as the same vantage as the first local run.
 
+## The agent-facing MCP tool
+
+An agent in its own loop can ask what we last measured at a door. The server
+speaks JSON-RPC over stdio, has no dependencies, and reads only a published
+capture whose bytes hash to the SHA-256 its manifest declares.
+
+```sh
+gh release download baseline-2026-08-22T162332Z-manual-gh32584556102a1 -D /tmp/cir
+node tools/mcp-server.mjs --manifest /tmp/cir/*.manifest.json
+```
+
+Two tools: `reachability_lookup` (one domain) and `dataset_status` (which
+capture is loaded, how old it is, how much of it is behavioural evidence).
+
+**It is read-only and it never probes on demand.** A reachability tool that
+fetched on request would be an on-request scanner aimed at whatever third party
+the caller named. `tools/test-lookup.mjs` asserts on the source that neither
+`lookup.mjs` nor `mcp-server.mjs` calls `fetch`, imports the prober, opens a
+socket or a process, or writes to disk.
+
+Three things the answers refuse to do, because each is how a lookup tool becomes
+confidently wrong:
+
+- **No field is present-tense.** There is no `reachable`, no `blocked`, no
+  `allowed`. Behaviour is `last_outcome` and travels welded to `observed_at`,
+  `age_minutes` and a `freshness` verdict against the 180-minute bound this
+  project already uses to decide when two observations stop being about the same
+  conditions. Our capture is one instant per night; the caller's question is
+  about now, and the envelope never lets those be confused.
+- **A door we did not knock on has no answer.** `last_outcome` is non-null only
+  where a request was actually sent. Doors are `behaviour`, `robots-declaration`
+  (robots.txt was read and says no) or `not-attempted` (robots.txt was
+  unreadable and this instrument fails closed — a fact about us, not the host).
+  On the 2026-08-22T162332Z capture that split is **945 / 100 / 3,955**: flatten
+  it and the tool would report 4,055 closed doors where only 100 are the site
+  actually saying no.
+- **An unprobed host is `unknown`.** No parent-domain fallback, no inference from
+  neighbours. `api.example.com` is not `example.com`.
+
+Crowd claims appear only once `tools/reports.mjs` has promoted them to
+`corroborated`. Contested and quarantined claims are counted beside them, never
+served as fact, and never added into the corroborated count.
+
 ## Status
 
 Baseline capture and immutable publication are flowing, and derived aggregates
@@ -57,4 +100,14 @@ The crowd-report envelope and quarantine state machine exist
 (`tools/reports.mjs`); nothing a stranger sends becomes data until an owned
 probe matches it or two independently keyed reporters agree, and there is no
 ingest endpoint yet. See METHODOLOGY.md for the promotion rules and the abuse
-and retention limits. The MCP tool and the public map follow.
+and retention limits. The agent-facing MCP tool is above. The public map, and
+the site pages that document the tool, follow.
+
+Known limit, measured rather than estimated: on the 2026-08-22T162332Z capture
+only **195 of 1,000 domains** carry any behavioural evidence at all. 452 domains
+redirect their `robots.txt`, and this instrument records redirects without
+following them, so its fail-closed policy stops those doors before a request is
+sent. RFC 9309 §2.3.1.2 says crawlers SHOULD follow at least five consecutive
+redirects for robots.txt, so this is a conformance gap and not a judgement call.
+Fixing it changes a declared comparability dimension, which is why it is a
+tracked card rather than a quiet patch.
