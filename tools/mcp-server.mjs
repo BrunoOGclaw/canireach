@@ -60,10 +60,17 @@ export const TOOLS = [
   },
   {
     name: 'dataset_status',
+    // NO PROPORTION IS ASSERTED HERE. This text said "most of the dataset is
+    // usually the latter", which was true of the automated capture it was
+    // written against (3,955 of 5,000 doors) and is false of the residential
+    // baseline (0 of 5,000) — the two differ only in whether an unreadable
+    // robots.txt fails closed. A description that ships a share teaches the
+    // calling model a number instead of sending it to read the real one, which
+    // is the entire job of this tool.
     description:
       'Which capture is loaded, how old it is, and how much of it is behavioural evidence rather than doors ' +
-      'this instrument chose not to knock on. Read this before trusting any lookup: most of the dataset is ' +
-      'usually the latter.',
+      'this instrument chose not to knock on. Call this before trusting any lookup: that split moves with the ' +
+      'capture and can be most of the dataset, so read it rather than assuming it.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
