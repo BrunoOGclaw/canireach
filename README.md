@@ -53,4 +53,8 @@ vary, so they must not be described as the same vantage as the first local run.
 Baseline capture and immutable publication are flowing, and derived aggregates
 are computed from the published bytes (`node tools/aggregate.mjs <capture.jsonl>`,
 reading both schema v1 and v2 so the immutable first baseline stays comparable).
-Crowd reports, the MCP tool, and the public map follow.
+The crowd-report envelope and quarantine state machine exist
+(`tools/reports.mjs`); nothing a stranger sends becomes data until an owned
+probe matches it or two independently keyed reporters agree, and there is no
+ingest endpoint yet. See METHODOLOGY.md for the promotion rules and the abuse
+and retention limits. The MCP tool and the public map follow.
