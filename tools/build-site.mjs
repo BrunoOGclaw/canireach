@@ -354,11 +354,16 @@ const HEADERS = `/api/*
   Referrer-Policy: strict-origin-when-cross-origin
 `;
 
-/** Pages that exist as directories so /method and /bot resolve without .html. */
+/**
+ * Flat `.html` files, not directories, so the host serves /method and /bot with
+ * 200 rather than a 308 to a trailing slash. Our probe advertises /bot to every
+ * domain it touches; answering that URL with a redirect is the exact
+ * agent-hostile sloppiness this project measures in other people.
+ */
 const PAGES = [
   { path: 'index.html', url: '/', title: 'Can I Reach? — a behavioral access map of the agent web' },
-  { path: 'method/index.html', url: '/method', title: 'Method — Can I Reach?' },
-  { path: 'bot/index.html', url: '/bot', title: 'About our probe — Can I Reach?' },
+  { path: 'method.html', url: '/method', title: 'Method — Can I Reach?' },
+  { path: 'bot.html', url: '/bot', title: 'About our probe — Can I Reach?' },
 ];
 
 export function buildSite({ capture, manifest, out }) {
@@ -372,11 +377,11 @@ export function buildSite({ capture, manifest, out }) {
     page(PAGES[0].title, 'Behavioral access measurements for the agent web.', indexBody(summary), `${SITE_ORIGIN}/`),
   );
   files.set(
-    'method/index.html',
+    'method.html',
     page(PAGES[1].title, 'How Can I Reach measures access, and what it refuses to do.', methodBody(summary), `${SITE_ORIGIN}/method`),
   );
   files.set(
-    'bot/index.html',
+    'bot.html',
     page(PAGES[2].title, 'What the CanIReachBot probe is and how to block it.', botBody(), `${SITE_ORIGIN}/bot`),
   );
   files.set(

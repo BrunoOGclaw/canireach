@@ -241,7 +241,12 @@ function runSuite(label, capture, manifest) {
   });
 
   t('the bot page states how to block us, in robots syntax', () => {
-    const bot = file('bot/index.html');
+    // Resolved from the advertised URL rather than a hardcoded path, so moving
+    // the page cannot quietly detach this check from the page agents are sent to.
+    const rel = PROBE_CONTACT.slice(SITE_ORIGIN.length).replace(/^\/+/, '');
+    const key = [rel, `${rel}.html`, `${rel}/index.html`].find((c) => built.files.has(c));
+    ok(key, `no built file serves the advertised probe contact ${PROBE_CONTACT}`);
+    const bot = file(key);
     const token = DIALECTS.find((d) => d.id === 'canireach').robots_token;
     ok(bot.includes(`User-agent: ${token}`), `bot page does not name our robots token ${token}`);
     ok(/Disallow: \//.test(bot), 'bot page does not show a working disallow rule');
