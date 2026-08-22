@@ -102,13 +102,12 @@ async function probeUrl(url, ua, { readBody = true } = {}) {
         elapsed_ms: Date.now() - started,
       };
     }
-    clearTimeout(timer);
-
     const headers = Object.fromEntries([...res.headers].map(([k, v]) => [k.toLowerCase(), v]));
     chain.push({ url: current, status: res.status });
 
     const loc = headers['location'];
     if (res.status >= 300 && res.status < 400 && loc && hop < MAX_REDIRECTS) {
+      clearTimeout(timer);
       try {
         current = new URL(loc, current).toString();
       } catch {
@@ -139,6 +138,11 @@ async function probeUrl(url, ua, { readBody = true } = {}) {
     } else {
       try { await res.body?.cancel(); } catch { /* fine */ }
     }
+
+    // Keep the request deadline alive through the body read. Some origins send
+    // headers and then never finish the body; clearing this timer immediately
+    // after fetch() turned one such origin into an unbounded full-run hang.
+    clearTimeout(timer);
 
     return {
       ok: true,
