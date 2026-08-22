@@ -130,6 +130,68 @@ const MUTANTS = [
     "  { path: 'mcp.html', url: '/mcp', title: 'The MCP tool — Can I Reach?' },\n",
     '',
   ],
+
+  // --- #24: the capture this surface renders is named, and it is pinned -----
+  // The defect these exist for shipped green: every number was recomputed from
+  // hashed bytes and correct, and the word beside them was "current" on a page
+  // pinned to the oldest capture in the project.
+  [
+    'a page may call its pinned capture the current one',
+    '  for (const [rel, body] of files) assertNoCurrencyClaim(body, rel);',
+    '',
+  ],
+  [
+    'the currency guard matches nothing',
+    '  const found = CURRENCY_CLAIMS.filter((phrase) => lower.includes(phrase));',
+    '  const found = [];',
+  ],
+  [
+    'the currency guard is case-sensitive, so a capitalised claim walks through',
+    '  const lower = String(text).toLowerCase();',
+    '  const lower = String(text);',
+  ],
+  [
+    'the coverage sentence stops naming its capture',
+    '<p>Of ${c.domains_indexed} domains in capture <code>${esc(s.capture_id)}</code> (<code>${esc(s.capture_class)}</code>), <strong>',
+    '<p>Of ${c.domains_indexed} domains, <strong>',
+  ],
+  [
+    'the descriptor stops saying which capture it describes',
+    '      capture_class: s.capture_class,',
+    '',
+  ],
+  [
+    'the descriptor stops disclosing that this surface is pinned',
+    '      selection: CAPTURE_SELECTION,',
+    '',
+  ],
+
+  // --- the instrument sentence is READ, never written -----------------------
+  [
+    'the instrument sentence goes back to a literal about one capture',
+    '      vantage_note: vantageNote(profile),',
+    "      vantage_note: 'This capture was taken from a residential vantage with robots-unavailable failing open.',",
+  ],
+  [
+    'a table cell asserts a robots policy this capture did not run',
+    'We could not read <code>robots.txt</code> as policy and sent no request. A fact about us.',
+    'We could not read <code>robots.txt</code> and failed closed. A fact about us.',
+  ],
+  [
+    'the page names the instrument policy as a literal instead of importing it',
+    '<code>${esc(INSTRUMENT_POLICY.robots_unavailable)}</code>',
+    '<code>fail-closed-only</code>',
+  ],
+
+  // The profile and observed-policy derivations live in lookup.mjs, so their
+  // mutants live in mutate-lookup.mjs. Six of them sat here first and reported
+  // INVALID rather than caught, which is the harness refusing to let a registry
+  // claim coverage of a file it does not patch.
+  [
+    'the instrument sentence drops the vantage it claims to report',
+    "    `This capture declares vantage class \\`${v('vantage.class')}\\`, robots-unavailable policy ` +",
+    '    `This capture declares a vantage class, robots-unavailable policy ` +',
+  ],
 ];
 
 process.exit(runMutants({ module: 'build-site.mjs', suite: 'test-site.mjs', mutants: MUTANTS }));
